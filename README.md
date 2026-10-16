@@ -379,6 +379,7 @@ If it says `NOT deleting`, something is still mounted inside the Debian folder. 
 - Problems and ideas: open an issue at <https://github.com/shivrajtode/spft/issues> and paste the output of `spft check`.
 
 Made by **Shivraj**: Telegram [@Shivraj_editx](https://t.me/Shivraj_editx), GitHub [shivrajtode](https://github.com/shivrajtode).
+And Special thanx💖 to my friend **Kaif** Telegram [@mkr_infinity](https://t.me/mkr_infinity) for recommending spflashtool linux version and giving some guide about it.
 
 Thanks to: [Termux](https://termux.dev/en/), [Termux:X11](https://github.com/termux/termux-x11), [box64](https://github.com/ptitSeb/box64), [Debian](https://www.debian.org), [mtkclient](https://github.com/bkerler/mtkclient), and the [Hovatek forum](https://www.hovatek.com/forum/post-228.html) for its SP Flash Tool guide and [error code list](https://www.hovatek.com/forum/post-93019.html).
 
