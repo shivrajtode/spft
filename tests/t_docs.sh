@@ -112,11 +112,16 @@ elif len(missing) != len(cmds):
 else:
     ok("all %d commands of `spft help` are in the README (%s)" % (len(cmds), ", ".join(cmds)))
 
-# the install line must be the same in README, publish.sh and the docs
+# the install line must be the same in README, publish.sh and the docs. As shipped it carries the placeholder
+# YOUR-GITHUB-NAME/spft; in a copy that publish.sh has already filled in (a published repository) it carries the
+# owner's real address instead. Either way: at least twice, always the same, and a plain owner/repository.
 line_re = re.compile(r"pkg update -y && pkg install -y git && git clone https://github\.com/([^ ]+) ~/spft && bash ~/spft/install\.sh")
 found = line_re.findall(readme)
-if len(found) >= 2 and set(found) == {"YOUR-GITHUB-NAME/spft"}:
-    ok("the install line appears %d times in the README, always with the YOUR-GITHUB-NAME/spft placeholder" % len(found))
+if len(found) >= 2 and len(set(found)) == 1 and re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", found[0]):
+    if found[0] == "YOUR-GITHUB-NAME/spft":
+        ok("the install line appears %d times in the README, always with the YOUR-GITHUB-NAME/spft placeholder" % len(found))
+    else:
+        ok("the install line appears %d times in the README, always with %s (this copy has been published)" % (len(found), found[0]))
 else:
     bad("the install line in the README is missing or inconsistent: %r" % (found,))
 publish = read("tools/publish.sh")

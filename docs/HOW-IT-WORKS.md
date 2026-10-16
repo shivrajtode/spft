@@ -118,8 +118,8 @@ You rarely need these. Set them in front of the command, for example `SPFT_MIN_M
 | `t_host.sh` | the `spft` command: start, stop (also the Termux:X11 server and a stale socket), enter, check, update, umount, uninstall (including: nothing is deleted while something is mounted), Termux:X11 settings, bad options |
 | `t_tool.sh` | `spft tool`: downloads, mirrors, checksums, unpacking, damaged zips, wrong CPU type |
 | `t_install.sh` | `install.sh` and `spft install`: fresh install, repeating it, no root (asked for before anything is installed), 32-bit kernel, no space, no internet, a failed tool download, folders with spaces |
-| `t_publish.sh` | `tools/publish.sh` against a stand-in GitHub |
-| `t_docs.sh` | the documentation: every link and `#anchor` inside the repository works, every command of `spft help` is in the README, the install line is the same everywhere |
+| `t_publish.sh` | `tools/publish.sh` against a stand-in GitHub, and that the published copy (your name filled in) still passes `t_docs.sh` |
+| `t_docs.sh` | the documentation: every link and `#anchor` inside the repository works, every command of `spft help` is in the README, the install line is the same everywhere (with the placeholder, or with your name after publishing) |
 
 `t_run.sh` and `t_host.sh` print what happened, and the output is compared with the saved copy in `tests/expected/`. After a change you made on purpose, run `bash tests/run_all.sh --update` and look at the diff in git.
 

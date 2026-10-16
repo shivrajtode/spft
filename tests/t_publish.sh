@@ -80,6 +80,9 @@ has "$T/clone/docs/placeholder-test.md" '^by octocat$' "a lone YOUR-GITHUB-NAME 
 if grep -rn --exclude-dir=.git --exclude-dir=tests --exclude=publish.sh 'YOUR-GITHUB-NAME' "$T/clone"; then bad "a placeholder is still in the repository (see above)"; else ok "no placeholder is left anywhere"; fi
 [ "$(stat -c %a "$T/proj/docs/placeholder-test.md")" = 644 ] && ok "rewritten files keep their permissions" || bad "permissions changed"
 (cd "$T/clone" && for f in install.sh spft tools/publish.sh lib/*.sh tests/*.sh; do bash -n "$f" || echo "syntax error in $f"; done) 2>&1 | grep -q . && bad "a script in the clone has a syntax error" || ok "every script in the clone passes bash -n"
+# the published copy has the user's name where the placeholder was: its own documentation test must still pass
+# (it once failed there, because it only knew the placeholder)
+if bash "$T/clone/tests/t_docs.sh" > "$T/docs.out" 2>&1; then ok "t_docs.sh passes in the published copy (name filled in)"; else bad "t_docs.sh fails in the published copy:"; grep '^FAIL' "$T/docs.out" | sed_t; fi
 
 echo; echo "=== 2. run it again with nothing changed"
 : > "$LOG"
