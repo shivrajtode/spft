@@ -1,0 +1,8 @@
+# Keep Unix line endings in the scripts, even when the repository is edited or checked out on Windows
+# (a script with Windows line endings fails in Termux with "bad interpreter" or "\r: command not found").
+* text=auto
+*.sh text eol=lf
+*.conf text eol=lf
+*.md text eol=lf
+spft text eol=lf
+install.sh text eol=lf

@@ -1,0 +1,85 @@
+=== 1. no X11 socket, auto -> VNC with a hint
+(Termux:X11 not detected - for the faster display, run 'spft' in Termux)
+spft-gui called
+starting SP Flash Tool from $T/opt/SP_Flash_Tool_test (Ctrl+C to stop)
+BOX64 args=[./flash_tool] DISPLAY=:1 NOMITSHM=1 QTPLUG=$T/opt/SP_Flash_Tool_test/plugins
+BOX64 libpath=$T/opt/SP_Flash_Tool_test/lib:$T/opt/SP_Flash_Tool_test:/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu
+exit=0
+
+=== 2. X11 socket present, auto -> Termux:X11
+display: Termux:X11
+starting SP Flash Tool from $T/opt/SP_Flash_Tool_test (Ctrl+C to stop)
+BOX64 args=[./flash_tool] DISPLAY=:0 NOMITSHM=1 QTPLUG=$T/opt/SP_Flash_Tool_test/plugins
+BOX64 libpath=$T/opt/SP_Flash_Tool_test/lib:$T/opt/SP_Flash_Tool_test:/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu
+exit=0
+openbox starts so far: 1
+
+=== 3. run again -> openbox must not be started twice
+openbox starts so far: 1
+
+=== 4. forced vnc while socket exists -> VNC
+spft-gui called
+starting SP Flash Tool from $T/opt/SP_Flash_Tool_test (Ctrl+C to stop)
+BOX64 args=[./flash_tool] DISPLAY=:1 NOMITSHM=1 QTPLUG=$T/opt/SP_Flash_Tool_test/plugins
+BOX64 libpath=$T/opt/SP_Flash_Tool_test/lib:$T/opt/SP_Flash_Tool_test:/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu
+exit=0
+
+=== 5. forced x11 without socket -> clear message, exit 1
+Termux:X11 is not running, or Debian was entered before it started.
+In Termux run:  spft
+exit=1
+
+=== 6. bad mode -> message, exit 1
+SPFT_DISPLAY must be x11 or vnc (or unset)
+exit=1
+
+=== 7. no tool installed -> tells you to run: spft tool, exit 1
+SP Flash Tool is not installed yet. In Termux run:  spft tool
+exit=1
+
+=== 8. a copy is already running -> no second copy, exit 0
+SP Flash Tool is already running (pid N), so no second copy is started.
+Switch to the Termux:X11 app (or your VNC viewer) to see it.
+To close it first, run in Termux:  spft stop   (never while a flash is running)
+exit=0
+--- once it is gone, the tool starts normally again:
+BOX64 args=[./flash_tool] DISPLAY=:1 NOMITSHM=1 QTPLUG=$T/opt/SP_Flash_Tool_test/plugins
+BOX64 libpath=$T/opt/SP_Flash_Tool_test/lib:$T/opt/SP_Flash_Tool_test:/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu
+
+=== 9. same, when only the process NAME is flash_tool (the command line was rewritten)
+SP Flash Tool is already running (pid N), so no second copy is started.
+exit=0
+
+=== 10. Termux:X11, first start: rc.xml is made from Debian's default, plus one maximize rule
+display: Termux:X11
+starting SP Flash Tool from $T/opt/SP_Flash_Tool_test (Ctrl+C to stop)
+rc.xml is well-formed XML; rules: 1
+  class=* type=normal maximized=yes
+everything else in rc.xml is identical to Debian's default
+openbox starts: 1   reconfigures: 0
+
+=== 11. second start keeps an edited rc.xml and does not start openbox again
+rc.xml untouched
+openbox starts: 1   reconfigures: 0
+
+=== 12. rc.xml made while openbox already runs -> openbox is told to reload it
+openbox starts: 1   reconfigures: 1
+rc.xml written again
+
+=== 13. Debian has no default rc.xml -> nothing is written, the tool still starts
+1
+ok: no rc.xml written
+
+=== 14. /opt/spft-current decides which version starts
+starting SP Flash Tool from $T/opt/spft-current (Ctrl+C to stop)
+BOX64 args=[./flash_tool] DISPLAY=:1 NOMITSHM=1 QTPLUG=unset
+--- and without the link, one of them is found:
+1
+
+=== 15. the v6 program name (SPFlashToolV6) is found and started
+BOX64 args=[./SPFlashToolV6] DISPLAY=:1 NOMITSHM=1 QTPLUG=unset
+
+=== 16. a running SPFlashToolV6 also blocks a second copy
+SP Flash Tool is already running (pid N), so no second copy is started.
+exit=0
+cleaned up

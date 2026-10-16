@@ -1,0 +1,346 @@
+=== A. x11 without termux-x11 installed
+spft: termux-x11 is not installed. In Termux run:  pkg install x11-repo  and then  pkg install termux-x11-nightly
+     (and install the Termux:X11 app: the file termux-x11-universal-debug.apk from
+      https://github.com/termux/termux-x11/releases/tag/nightly - or run: bash install.sh)
+exit=1
+
+=== B. x11 called as root
+spft: run spft from Termux as a normal user (it calls su itself)
+exit=1
+
+=== C. x11, first run (server not running yet)
+>> starting the Termux:X11 server
+>> setting up the Termux:X11 display: landscape, fullscreen, zoom 150%
+   additionalKbdVisible: true -> false
+   fullscreen: false -> true
+   forceOrientation: portrait -> landscape
+   displayScale: 100 -> 150
+   displayResolutionMode: native -> scaled
+   displayFilteringMode: nearest -> bilinear
+exit=0
+--- calls:
+termux-x11 :0
+am start --user 0 -n com.termux.x11/com.termux.x11.MainActivity
+wake-lock
+mount -o bind /dev $T/root/dev
+mount -o bind /dev/pts $T/root/dev/pts
+mount -t tmpfs -o mode=1777,size=256m tmpfs $T/root/dev/shm
+mount -t proc proc $T/root/proc
+mount -t sysfs sysfs $T/root/sys
+mount -o bind $T/pfx/tmp/.X11-unix $T/root/tmp/.X11-unix
+--- command line handed to chroot (one argument per line):
+$T/root
+/usr/bin/env
+-i
+HOME=/root
+TERM=xterm
+LANG=C.UTF-8
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+/bin/bash
+-lc
+SPFT_DISPLAY=x11 spft-run
+--- helpers written inside Debian:
+-rwxr-xr-x spft-gui
+-rwxr-xr-x spft-run
+spft-run identical to lib/run.sh
+spft-gui identical to lib/gui.sh
+--- file-dialog shortcuts (top level of Debian, then Debian's home):
+/sdcard -> /mnt/sdcard
+~/Download -> /mnt/sdcard/Download
+~/sdcard -> /mnt/sdcard
+--- the root step ran a copy kept under Termux's own folder:
+lib spft 
+copy of lib/run.sh is identical
+--- Termux:X11 settings now (the app started out in portrait, at the phone's own size):
+fullscreen=true forceOrientation=landscape displayScale=150 displayResolutionMode=scaled displayFilteringMode=bilinear additionalKbdVisible=false showAdditionalKbd=true touchMode=1 
+--- saved for 'x11 reset':
+fullscreen:false forceOrientation:portrait displayScale:100 displayResolutionMode:native displayFilteringMode:nearest additionalKbdVisible:true 
+--- the phone was kept awake: wake-lock calls = 1
+
+=== F. x11 again (server already up -> must not start a second one, no setting changed again)
+>> setting up the Termux:X11 display: landscape, fullscreen, zoom 150%
+exit=0
+termux-x11 starts: 0   am calls: 1
+settings-tool calls: list=1 set=0
+
+=== H. plain `spft` (no argument) does the same as x11
+>> setting up the Termux:X11 display: landscape, fullscreen, zoom 150%
+exit=0
+tool started: 1   last chroot args:
+-lc
+SPFT_DISPLAY=x11 spft-run
+
+=== H2. spft start / spft help / an unknown command
+start: exit=0   tool started: 1
+spft - SP Flash Tool on a rooted phone or tablet (Termux + Debian chroot + box64 + Termux:X11)
+  spft                      start SP Flash Tool (the same as: spft x11)
+help: exit=0
+spft - SP Flash Tool on a rooted phone or tablet (Termux + Debian chroot + box64 + Termux:X11)
+unknown: exit=1
+
+=== K. x11 reverse zoom=200 keys
+>> setting up the Termux:X11 display: reverse landscape, fullscreen, zoom 200%
+   additionalKbdVisible: false -> true
+   forceOrientation: landscape -> reverse landscape
+   displayScale: 150 -> 200
+   displayFilteringMode: bilinear -> nearest
+exit=0
+fullscreen=true forceOrientation=reverse landscape displayScale=200 displayResolutionMode=scaled displayFilteringMode=nearest additionalKbdVisible=true showAdditionalKbd=true touchMode=1 
+
+=== K2. x11 portrait: no zoom unless asked for (the tool is wider than a portrait screen)
+>> setting up the Termux:X11 display: portrait, fullscreen, zoom 100%
+   additionalKbdVisible: true -> false
+   forceOrientation: reverse landscape -> portrait
+   displayScale: 200 -> 100
+exit=0
+fullscreen=true forceOrientation=portrait displayScale=100 displayResolutionMode=scaled displayFilteringMode=nearest additionalKbdVisible=false showAdditionalKbd=true touchMode=1 
+
+=== L. x11 plain leaves the settings alone
+exit=0
+settings-tool calls: 0   tool started: 1
+
+=== M. x11 reset puts the original settings back and does not start the tool
+>> putting the Termux:X11 settings back as they were
+   fullscreen: true -> false
+   displayResolutionMode: scaled -> native
+   additionalKbdVisible: false -> true
+>> done
+exit=0
+fullscreen=false forceOrientation=portrait displayScale=100 displayResolutionMode=native displayFilteringMode=nearest additionalKbdVisible=true showAdditionalKbd=true touchMode=1 
+ok: saved file removed
+tool started: 0   am calls: 1
+--- reset again:
+>> nothing to put back: spft has not changed the Termux:X11 settings
+exit=0
+
+=== V. vnc starts the tool in VNC mode
+exit=0
+-lc
+SPFT_DISPLAY=vnc spft-run
+
+=== D. enter with a command
+exit=0
+--- last chroot args:
+/bin/bash
+-lc
+echo hi there
+
+=== E. enter without a command
+exit=0
+--- last chroot args:
+/bin/bash
+-l
+
+=== I. stop closes the tool and lets the phone sleep again; a second stop finds nothing
+stopped 1 process(es) that were running inside Debian
+removed an old Termux:X11 socket (no server was running)
+exit=0
+ok: the tool process is gone
+wake-unlock calls: 1
+stopped 0 process(es) that were running inside Debian
+exit=0
+
+=== I2. stop also stops the Termux:X11 server, and removes the socket that a killed server leaves behind
+-- a server is running (its process is called "termux-x11 <app id> :0")
+stopped 0 process(es) that were running inside Debian
+stopped the Termux:X11 server
+exit=0
+ok: the server process is gone
+ok: the socket file is gone
+-- only a socket file is left (the server was killed): it is removed, so that the next spft starts a new server
+stopped 0 process(es) that were running inside Debian
+removed an old Termux:X11 socket (no server was running)
+exit=0
+ok: the stale socket is gone
+-- nothing at all: nothing to report
+0
+
+=== J. umount also stops processes first, then reports
+stopped 1 process(es) that were running inside Debian
+all unmounted - $T/root is safe to delete
+exit=0
+
+=== J2. umount while something is still mounted: a WARNING, the list, and exit status 1
+stopped 0 process(es) that were running inside Debian
+WARNING: still mounted under $T/root - do NOT delete that folder until this list is empty:
+/data/media $T/root/mnt/sdcard sdcardfs rw,nosuid,nodev 0 0
+exit=1
+
+=== N. bad options
+-- x11 sideways
+spft: x11: unknown option 'sideways'  (options: reverse portrait auto zoom=N keys plain reset)
+exit=1
+-- x11 zoom=abc
+spft: x11: zoom=N needs a whole number, for example zoom=150
+exit=1
+-- x11 zoom=
+spft: x11: zoom=N needs a whole number, for example zoom=150
+exit=1
+-- x11 zoom=500
+spft: x11: zoom must be between 30 and 300
+exit=1
+-- x11 zoom=20
+spft: x11: zoom must be between 30 and 300
+exit=1
+-- x11 zoom=0150
+spft: x11: zoom must be between 30 and 300
+exit=1
+-- x11 zoom=08
+spft: x11: zoom must be between 30 and 300
+exit=1
+
+=== O. an older Termux:X11 without displayFilteringMode and additionalKbdVisible
+>> starting the Termux:X11 server
+>> setting up the Termux:X11 display: landscape, fullscreen, zoom 150%
+   fullscreen: false -> true
+   forceOrientation: portrait -> landscape
+   displayScale: 100 -> 150
+   displayResolutionMode: native -> scaled
+   not applied: additionalKbdVisible(not in this app version) displayFilteringMode(not in this app version)
+exit=0
+fullscreen=true forceOrientation=landscape displayScale=150 displayResolutionMode=scaled showAdditionalKbd=true touchMode=1 
+tool started: 1
+
+=== O2. an app version without forceOrientation: the by-hand steps are shown
+>> setting up the Termux:X11 display: landscape, fullscreen, zoom 150%
+   additionalKbdVisible: true -> false
+   fullscreen: false -> true
+   displayScale: 100 -> 150
+   displayResolutionMode: native -> scaled
+   displayFilteringMode: nearest -> bilinear
+   not applied: forceOrientation(not in this app version)
+   By hand instead: in the Termux:X11 app open Preferences > Output and set
+     Screen orientation = landscape    Fullscreen = on    Display resolution mode = scaled    Display scale, % = 150
+exit=0
+tool started: 1
+
+=== P. the Termux:X11 app does not answer (about 8 s)
+>> setting up the Termux:X11 display: landscape, fullscreen, zoom 150%
+>> the Termux:X11 app did not answer, so its settings were not changed
+   By hand instead: in the Termux:X11 app open Preferences > Output and set
+     Screen orientation = landscape    Fullscreen = on    Display resolution mode = scaled    Display scale, % = 150
+exit=0
+settings unchanged: fullscreen=false forceOrientation=portrait displayScale=100 displayResolutionMode=native displayFilteringMode=nearest additionalKbdVisible=true showAdditionalKbd=true touchMode=1 
+tool started: 1
+
+=== Q. a Termux:X11 package without termux-x11-preference
+>> termux-x11-preference is missing (try: pkg upgrade termux-x11-nightly), so the display can't be set up for you
+   By hand instead: in the Termux:X11 app open Preferences > Output and set
+     Screen orientation = landscape    Fullscreen = on    Display resolution mode = scaled    Display scale, % = 150
+exit=0
+tool started: 1
+
+=== X. spft check (the Termux part, then the phone part) with the Termux:X11 app installed
+== Termux ==
+root     : su found
+x11-pkg  : installed
+x11-app  : Termux:X11 app installed
+storage  : run termux-setup-storage once if you want Termux to see your Download folder (optional)
+== phone and Debian ==
+kernel   : 64-bit ARM (CONFIG_ARM64=y) - OK, a 32-bit Android userspace doesn't matter
+cdc_acm  : MISSING - this kernel was built without it (CONFIG_USB_ACM), so SP Flash Tool can't see a device from this phone (use mtkclient instead)
+chroot   : $T/sysbin/chroot
+android  : unknown (API ?), ABIs: ?
+debian   : installed in $T/root
+box64    : missing - run: spft install
+tool     : NOT installed - run: spft tool
+exit=0
+
+=== X1. cdc_acm: what the kernel config says when the driver folder is missing
+-- FAKE_ACM=m
+cdc_acm  : NOT LOADED - this kernel has the driver as a module. Try:  su -c 'modprobe cdc_acm'  and run spft check again
+-- FAKE_ACM=y
+cdc_acm  : not found, although the kernel config says it is built in. If the target is never detected, use another host phone (or mtkclient)
+-- FAKE_ACM=n
+cdc_acm  : MISSING - this kernel was built without it (CONFIG_USB_ACM), so SP Flash Tool can't see a device from this phone (use mtkclient instead)
+-- FAKE_ACM=none
+cdc_acm  : not found, and the kernel config can't be read to tell why. If the target is never detected, use another host phone (or mtkclient)
+-- FAKE_ACM=(option not in the config)
+cdc_acm  : MISSING - this kernel was built without it (CONFIG_USB_ACM), so SP Flash Tool can't see a device from this phone (use mtkclient instead)
+
+=== X2. ... with the app missing
+x11-app  : NOT installed - get termux-x11-universal-debug.apk: https://github.com/termux/termux-x11/releases/tag/nightly
+exit=0
+
+=== X3. ... when the phone's package manager can't be asked
+x11-app  : could not tell (open the Termux:X11 app once to check)
+
+=== U. spft update: git pull, then the install step runs again (here the pkg stand-in stops it)
+
+>> getting the newest spft
+From $T/origin
+   HASH..HASH  main       -> origin/main
+Updating HASH..HASH
+Fast-forward
+ lib/run.sh | 1 +
+ 1 file changed, 1 insertion(+)
+
+>> applying it
+
+>> checking root
+>> kernel is 64-bit ARM - OK (a 32-bit Android userspace and 32-bit Termux don't matter)
+pkg stub: would install install -y wget curl xz-utils tar unzip coreutils
+spft: pkg could not install the Termux packages (try: termux-change-repo)
+exit=1
+ok: the clone got the newer lib/run.sh
+--- a copy that was not made with git clone:
+spft: this copy of spft was not made with git clone, so it can't update itself - clone the repository again (see the README)
+exit=1
+
+=== G. server that never makes its socket (takes ~20 s)
+>> starting the Termux:X11 server
+boom: no app
+spft: the Termux:X11 server did not start (is the Termux:X11 app installed? see the messages above)
+exit=1
+
+=== W. uninstall (last: it deletes the pretend Debian folder)
+-- an unknown option
+spft: uninstall: unknown option '--frob'  (the only option is --yes)
+exit=1
+-- anything but "yes" cancels
+This deletes the Debian system in $T/invisible (SP Flash Tool, box64 and everything else inside it)
+and the downloads in $T/dl. It stops SP Flash Tool if it is running.
+Your own files in the phone's storage are NOT touched. The spft command and its folder stay.
+Type yes and press Enter to continue: cancelled - nothing was deleted
+exit=1
+ok: nothing was deleted
+rm calls: 0
+-- something is still mounted inside the folder: NOTHING is deleted, exit 1
+This deletes the Debian system in $T/invisible (SP Flash Tool, box64 and everything else inside it)
+and the downloads in $T/dl. It stops SP Flash Tool if it is running.
+Your own files in the phone's storage are NOT touched. The spft command and its folder stay.
+stopped 0 process(es) that were running inside Debian
+WARNING: still mounted under $T/root - do NOT delete that folder until this list is empty:
+/dev/block/dm-0 $T/root/dev tmpfs rw 0 0
+
+spft: NOT deleting $T/root: something is still mounted inside it (listed above). Restart the phone, then run: spft uninstall
+spft: the Debian folder was NOT deleted (see above)
+exit=1
+ok: the Debian folder is untouched
+rm calls: 0
+ok: the downloads are untouched
+-- a folder that is too shallow, or inside the system folders, is refused (made-up names: nothing real is at risk here)
+spft: refusing to delete '/spft-test-no-such-folder': the Debian folde
+exit=1
+spft: refusing to delete '/proc/spft-test/no/such/folder'
+exit=1
+rm calls: 0
+-- nothing is mounted: the Debian folder and spft's downloads go, a file of yours in that folder stays
+This deletes the Debian system in $T/invisible (SP Flash Tool, box64 and everything else inside it)
+and the downloads in $T/dl. It stops SP Flash Tool if it is running.
+Your own files in the phone's storage are NOT touched. The spft command and its folder stay.
+Type yes and press Enter to continue: stopped 0 process(es) that were running inside Debian
+all unmounted - $T/root is safe to delete
+>> deleting $T/root
+>> deleted $T/root
+
+>> removed. To remove spft itself as well, run:  rm -rf "$T" "$T/pfx/bin/spft"
+exit=0
+ok: the Debian folder is gone
+keep-me.txt 
+wake-unlock calls: 1
+-- and again, now that nothing is left
+nothing to delete: $T/root does not exist
+>> removed. To remove spft itself as well, run:  rm -rf "$T" "$T/pfx/bin/spft"
+exit=0
+cleaned up

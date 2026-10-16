@@ -1,0 +1,938 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# spft - run MediaTek's SP Flash Tool from Termux on a rooted Android phone or tablet.
+# (Termux + a root Debian arm64 chroot + box64 + the Termux:X11 display.)
+#
+#   spft help     lists the commands.
+#   README.md     has the step-by-step guide.
+#
+# Run it from Termux as a normal user. It calls su itself when it needs root.
+set -eu
+
+# Root phase: never let Termux's libraries reach Android's own tools (readlink, mount, ...).
+# They would load Termux's OpenSSL and die with "CANNOT LINK EXECUTABLE".
+if [ "$EUID" -eq 0 ]; then unset LD_LIBRARY_PATH LD_PRELOAD; fi
+
+PREFIX=${PREFIX:-/data/data/com.termux/files/usr}
+R=${SPFT_ROOT:-/data/local/spft-debian}
+SUITE=${SPFT_SUITE:-trixie}
+DL=${SPFT_DL:-${HOME:-/data/local/tmp}/spft-dl}
+URL=${SPFT_URL:-https://raw.githubusercontent.com/debuerreotype/docker-debian-artifacts/dist-arm64v8/$SUITE/slim/oci/blobs/rootfs.tar.gz}
+
+# Where this script lives (the `spft` command runs it by its full path; a link to it works too).
+resolve_self() {
+  local p=$0 t n=0
+  case $p in /*) ;; *) p=$PWD/${p#./} ;; esac
+  while [ -L "$p" ] && [ "$n" -lt 20 ]; do
+    t=$(readlink "$p") || break
+    case $t in /*) p=$t ;; *) p=${p%/*}/$t ;; esac
+    n=$((n + 1))
+  done
+  printf '%s\n' "$p"
+}
+SELF=$(resolve_self)
+SPFT_HOME=${SELF%/*}
+LIB=$SPFT_HOME/lib
+
+die() { echo "spft: $*" >&2; exit 1; }
+say() { printf '\n>> %s\n' "$*"; }
+row() { printf '%-9s: %s\n' "$1" "$2"; }
+is_root() { [ "$EUID" -eq 0 ]; }
+
+usage() {
+  cat <<'EOF'
+spft - SP Flash Tool on a rooted phone or tablet (Termux + Debian chroot + box64 + Termux:X11)
+
+  spft                      start SP Flash Tool (the same as: spft x11)
+  spft x11 [options]        start it on Termux:X11. The screen is turned to landscape, fullscreen, 150% zoom.
+        reverse               landscape the other way up (when the picture is upside down)
+        portrait | auto       do not force landscape (zoom is then 100)
+        zoom=170              size in percent (default 150; above about 160 the tool is taller than the screen)
+        keys                  keep Termux:X11's extra-keys bar (hidden by default, to make room)
+        plain                 leave the Termux:X11 settings alone
+        reset                 put the Termux:X11 settings back as they were before spft changed them
+  spft vnc                  start it on a VNC desktop instead (viewer app -> localhost:5901, password spft1234)
+  spft stop                 close SP Flash Tool and the Termux:X11 server (never while it is flashing)
+  spft tool [FILE|URL|NAME] install or change SP Flash Tool. Without an argument it uses the Linux zip from your
+                            Download folder if there is one, and downloads it otherwise.
+                            `spft tool list` shows the versions it knows.
+  spft check                test the phone and the setup, with a hint for every problem
+  spft update               get the newest spft (git pull) and apply it
+  spft install              set up Debian + box64 + SP Flash Tool (install.sh runs this for you)
+  spft enter [command]      root shell inside Debian (or run one command there)
+  spft umount               stop and unmount everything. It says WARNING and exits with 1 if something stays mounted.
+  spft uninstall [--yes]    delete the Debian system and the downloads (asks first, and refuses while anything
+                            is still mounted - the Debian folder has your phone's /dev and storage mounted inside)
+
+Inside Debian the phone's internal storage is /sdcard. In the tool's file dialogs type, for example,
+/sdcard/Download in the "File name" box and press Enter.
+
+Made by Shivraj - Telegram @Shivraj_editx - GitHub shivrajtode
+EOF
+}
+
+# Prints 64, 32 or unknown, from the running kernel's config (CONFIG_ARM64). Android userspace bitness is irrelevant.
+kernel_arch() {
+  local cfg
+  cfg=$(if is_root; then zcat /proc/config.gz; else su -c 'zcat /proc/config.gz'; fi 2>/dev/null || true)
+  if [ -z "$cfg" ]; then echo unknown
+  elif printf '%s\n' "$cfg" | grep -q '^CONFIG_ARM64=y'; then echo 64
+  else echo 32
+  fi
+}
+
+# Prints y, m or n for CONFIG_USB_ACM (the cdc_acm USB serial driver) in the running kernel's config, or nothing
+# when the config can't be read. m = built as a module that may just not be loaded.
+acm_config() {
+  local cfg
+  cfg=$(zcat /proc/config.gz 2>/dev/null || true)
+  [ -n "$cfg" ] || return 0
+  case "$(printf '%s\n' "$cfg" | grep '^CONFIG_USB_ACM=' || true)" in
+    CONFIG_USB_ACM=y) echo y ;;
+    CONFIG_USB_ACM=m) echo m ;;
+    *) echo n ;;
+  esac
+}
+
+# free_mb PATH   prints the free space in MB on that path's partition (nothing when it can't be told)
+free_mb() {
+  local b s
+  read -r b s < <(stat -f -c '%a %S' "$1" 2>/dev/null) || return 0
+  case ${b}${s} in '' | *[!0-9]*) return 0 ;; esac
+  echo $((b * s / 1048576))
+}
+
+find_chroot() {
+  CHROOT=
+  for c in /system/bin/chroot /system/xbin/chroot "$PREFIX/bin/chroot"; do
+    if [ -x "$c" ]; then CHROOT=$c; return 0; fi
+  done
+  return 1
+}
+
+chroot_run() { # chroot_run COMMAND...   run a command inside $R (Termux's own chroot needs Termux's libraries)
+  if [ "${CHROOT#"$PREFIX"/}" != "$CHROOT" ]; then
+    LD_LIBRARY_PATH="$PREFIX/lib" "$CHROOT" "$R" "$@"
+  else
+    "$CHROOT" "$R" "$@"
+  fi
+}
+
+need_lib() { [ -d "$LIB" ] || die "the lib folder is missing next to this script - use the whole repository (git clone), not just the spft file"; }
+need_su() { command -v su >/dev/null 2>&1 || die "no su found - this needs a rooted phone (Magisk, KernelSU, ...)"; }
+root_ok() { [ "$(su -c 'id -u' 2>/dev/null || true)" = 0 ]; }
+
+# The root steps run a copy of this script (and lib/) kept under Termux's own folder: the repository may sit
+# on shared storage, which root can't always read.
+prep_app() {
+  need_lib
+  if [ "$SPFT_HOME" != "$DL/app" ]; then
+    mkdir -p "$DL/app"
+    rm -rf "$DL/app/lib"
+    cp -f "$SELF" "$DL/app/spft"
+    cp -rf "$LIB" "$DL/app/lib"
+  fi
+}
+root_env() { printf 'LD_LIBRARY_PATH=%s SPFT_ROOT=%s SPFT_SUITE=%s SPFT_DL=%s' "$PREFIX/lib" "$R" "$SUITE" "$DL"; }
+root_args() { if [ $# -gt 0 ]; then printf '%q ' "$@"; fi; }
+# as_root ARGS...   run this script as root with ARGS, and do not come back (the root step replaces this one)
+as_root() { prep_app; exec su -c "$(root_env) $PREFIX/bin/bash $DL/app/spft $(root_args "$@")"; }
+# root_call ARGS...   the same, but come back with its exit status
+root_call() { prep_app; su -c "$(root_env) $PREFIX/bin/bash $DL/app/spft $(root_args "$@")"; }
+
+wake_lock() { if command -v termux-wake-lock >/dev/null 2>&1; then termux-wake-lock >/dev/null 2>&1 || true; fi; }
+wake_unlock() { if command -v termux-wake-unlock >/dev/null 2>&1; then termux-wake-unlock >/dev/null 2>&1 || true; fi; }
+
+# Android system properties and apps, as the normal Termux user
+prop() { local g; g=$(command -v getprop 2>/dev/null || echo /system/bin/getprop); "$g" "$1" 2>/dev/null || true; }
+app_installed() { # app_installed PACKAGE -> 0 installed, 1 not installed, 2 can't tell
+  local pm all
+  pm=$(command -v pm 2>/dev/null || echo /system/bin/pm)
+  all=$(timeout 25 "$pm" list packages 2>/dev/null || true)
+  [ -n "$all" ] || return 2
+  case $all in *"package:$1"$'\n'* | *"package:$1") return 0 ;; esac
+  return 1
+}
+
+is_mounted() { grep -qF " $1 " /proc/mounts; }
+
+bind() { # bind SRC DST  (skipped when SRC does not exist)
+  [ -d "$1" ] || return 0
+  mkdir -p "$2"
+  is_mounted "$2" || /system/bin/mount -o bind "$1" "$2"
+}
+
+mounts() {
+  bind /dev "$R/dev"
+  bind /dev/pts "$R/dev/pts"
+  mkdir -p "$R/dev/shm"
+  is_mounted "$R/dev/shm" || /system/bin/mount -t tmpfs -o mode=1777,size=256m tmpfs "$R/dev/shm" || true
+  is_mounted "$R/proc" || /system/bin/mount -t proc proc "$R/proc"
+  is_mounted "$R/sys" || /system/bin/mount -t sysfs sysfs "$R/sys"
+  src=/data/media/0
+  [ -d "$src" ] || src=/sdcard
+  bind "$src" "$R/mnt/sdcard"
+  # Termux:X11's socket folder, so programs in Debian can reach its display (skipped until the X server has started)
+  bind "$PREFIX/tmp/.X11-unix" "$R/tmp/.X11-unix"
+}
+
+# (Re)write the two helper commands inside Debian. Done on every `enter`, so they are always current.
+write_helpers() {
+  need_lib
+  mkdir -p "$R/usr/local/bin" "$R/root"
+  # shortcuts for the tool's file dialogs: /sdcard works like on Android; "root" in the sidebar also shows
+  # sdcard and Download
+  ln -sfn /mnt/sdcard "$R/sdcard"
+  ln -sfn /mnt/sdcard "$R/root/sdcard"
+  ln -sfn /mnt/sdcard/Download "$R/root/Download"
+  cp -f "$LIB/gui.sh" "$R/usr/local/bin/spft-gui"
+  cp -f "$LIB/run.sh" "$R/usr/local/bin/spft-run"
+  chmod 755 "$R/usr/local/bin/spft-gui" "$R/usr/local/bin/spft-run"
+}
+
+root_enter() { # root_enter [command...]   mount, then open a shell (or run the command) inside the chroot
+  unset LD_LIBRARY_PATH LD_PRELOAD
+  [ -x "$R/bin/bash" ] || die "no Debian in $R - run: spft install"
+  write_helpers
+  find_chroot || die "no chroot command found (tried /system/bin, /system/xbin and Termux)"
+  mounts
+  if [ $# -gt 0 ]; then set -- -lc "$*"; else set -- -l; fi
+  chroot_run /usr/bin/env -i HOME=/root TERM="${TERM:-xterm-256color}" LANG=C.UTF-8 \
+    PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin /bin/bash "$@"
+}
+
+chroot_pids() { # the PID of every process whose root folder is the Debian folder
+  local p
+  for p in /proc/[0-9]*; do
+    if [ "$(/system/bin/readlink "$p/root" 2>/dev/null)" = "$R" ]; then echo "${p#/proc/}"; fi
+  done
+}
+
+kill_chroot() { # stop everything that runs inside Debian (the tool, openbox, the VNC server ...)
+  local pids n
+  pids=$(chroot_pids)
+  n=$(printf '%s\n' "$pids" | grep -c .) || true
+  if [ -n "$pids" ]; then
+    # shellcheck disable=SC2086
+    kill $pids 2>/dev/null || true
+    sleep 2
+    pids=$(chroot_pids)
+    # shellcheck disable=SC2086
+    if [ -n "$pids" ]; then kill -9 $pids 2>/dev/null || true; fi
+  fi
+  echo "stopped $n process(es) that were running inside Debian"
+}
+
+root_stop() {
+  unset LD_LIBRARY_PATH LD_PRELOAD
+  kill_chroot
+}
+
+root_umount() {
+  unset LD_LIBRARY_PATH LD_PRELOAD
+  kill_chroot
+  for d in tmp/.X11-unix mnt/sdcard dev/shm dev/pts dev proc sys; do
+    if is_mounted "$R/$d"; then
+      /system/bin/umount "$R/$d" || echo "spft: could not unmount $R/$d (busy?)" >&2
+    fi
+  done
+  if grep -qF " $R" /proc/mounts; then
+    echo "WARNING: still mounted under $R - do NOT delete that folder until this list is empty:"
+    grep -F " $R" /proc/mounts
+    return 1
+  fi
+  echo "all unmounted - $R is safe to delete"
+}
+
+# Deletes the Debian folder, but only when nothing is mounted inside it any more. While the mounts are there, the
+# folder holds the phone's /dev and its internal storage, and a recursive delete would wipe both.
+root_uninstall() {
+  unset LD_LIBRARY_PATH LD_PRELOAD
+  case $R in
+    /*/*/*) ;;
+    *) die "refusing to delete '$R': the Debian folder must be at least three levels deep, like /data/local/spft-debian" ;;
+  esac
+  case $R in
+    /proc/* | /sys/* | /dev/* | /system/* | /storage/* | /sdcard/* | /mnt/*) die "refusing to delete '$R'" ;;
+  esac
+  if [ ! -e "$R" ]; then echo "nothing to delete: $R does not exist"; return 0; fi
+  if ! root_umount; then
+    echo
+    die "NOT deleting $R: something is still mounted inside it (listed above). Restart the phone, then run: spft uninstall"
+  fi
+  # one more look right before the delete
+  if grep -qF " $R" /proc/mounts; then die "NOT deleting $R: something is mounted inside it again"; fi
+  echo ">> deleting $R"
+  /system/bin/rm -rf "$R"
+  if [ -e "$R" ]; then die "could not delete everything in $R"; fi
+  echo ">> deleted $R"
+}
+
+# --- SP Flash Tool inside Debian: where it is, unpacking a zip --------------------------------------------
+
+root_tool_where() { # prints where an installed SP Flash Tool is; exit status 1 when there is none
+  local p
+  [ -d "$R/opt" ] || return 1
+  p=$(find "$R/opt" -maxdepth 3 -type f \( -name flash_tool -o -name SPFlashToolV6 \) 2>/dev/null | head -n 1)
+  [ -n "$p" ] || return 1
+  printf '%s\n' "$p"
+}
+
+root_find_zip() { # root_find_zip NAME   a Linux SP Flash Tool zip in the phone's Download folder (root can always read it)
+  local d f
+  for d in /data/media/0/Download /data/media/0; do
+    for f in "$d/SP_Flash_Tool_${1}_Linux.zip" "$d"/SP_Flash_Tool*[Ll]inux*.zip; do
+      if [ -f "$f" ]; then printf '%s\n' "$f"; return 0; fi
+    done
+  done
+  return 1
+}
+
+root_tool() { # root_tool ZIP   unpack SP Flash Tool into Debian's /opt and make it the one that starts
+  is_root || die "internal: needs root"
+  local zip=$1 p tmp src top dest exe name n hex rel
+  [ -x "$R/bin/bash" ] || die "no Debian in $R - run: spft install"
+  if [ ! -f "$zip" ]; then # root reaches shared storage through /data/media/0
+    for p in /sdcard /storage/emulated/0 /storage/self/primary; do
+      case $zip in
+        "$p"/*) if [ -f "/data/media/0${zip#"$p"}" ]; then zip=/data/media/0${zip#"$p"}; break; fi ;;
+      esac
+    done
+  fi
+  [ -f "$zip" ] || die "cannot read $zip"
+  find_chroot || die "no chroot command found (tried /system/bin, /system/xbin and Termux)"
+  mkdir -p "$R/opt"
+  tmp=$R/opt/.spft-unpack
+  rm -rf "$tmp"
+  mkdir -p "$tmp"
+  echo ">> unpacking $zip"
+  if ! env LD_LIBRARY_PATH="$PREFIX/lib" PATH="$PREFIX/bin:$PATH" "$PREFIX/bin/unzip" -q -o "$zip" -d "$tmp"; then
+    rm -rf "$tmp"
+    die "could not unpack $zip (damaged download? delete it and try again)"
+  fi
+  # a zip made like SP Flash Tool's has one folder inside; otherwise the zip's own name is used
+  n=$(find "$tmp" -mindepth 1 -maxdepth 1 | wc -l)
+  src=$tmp
+  top=
+  if [ "$n" -eq 1 ]; then
+    p=$(find "$tmp" -mindepth 1 -maxdepth 1)
+    if [ -d "$p" ]; then src=$p; top=${p##*/}; fi
+  fi
+  if [ -z "$top" ]; then top=${zip##*/}; top=${top%.zip}; fi
+  top=$(printf '%s' "$top" | tr -c 'A-Za-z0-9._-' '_')
+  case $top in '' | .*) top=spft-tool$top ;; esac
+  dest=$R/opt/$top
+  rm -rf "$dest"
+  mv "$src" "$dest"
+  rm -rf "$tmp"
+  exe=
+  for name in flash_tool SPFlashToolV6; do
+    p=$(find "$dest" -maxdepth 3 -type f -name "$name" 2>/dev/null | head -n 1)
+    if [ -n "$p" ]; then exe=$p; break; fi
+  done
+  if [ -z "$exe" ]; then
+    rm -rf "$dest"
+    die "there is no flash_tool in that zip. Is it the LINUX build of SP Flash Tool (not the Win zip)?"
+  fi
+  chmod 755 "$exe"
+  chmod -R a+rX "$dest" 2>/dev/null || true
+  # box64 runs 64-bit x86 programs only: check the file's header from inside Debian (ELF, machine 0x3e = x86-64)
+  rel=/opt/${exe#"$R"/opt/}
+  hex=$(chroot_run /usr/bin/od -An -tx1 -N20 "$rel" 2>/dev/null | tr -d ' \n') || hex=
+  case $hex in
+    7f454c46*) ;;
+    *) rm -rf "$dest"; die "${exe##*/} in that zip is not a Linux program - wrong zip?" ;;
+  esac
+  if [ "$(printf '%s' "$hex" | cut -c37-40)" != 3e00 ]; then   # bytes 18-19 of the header: the machine type
+    rm -rf "$dest"
+    die "${exe##*/} in that zip is not a 64-bit x86 program, and box64 can only run those. Use the 64-bit Linux build."
+  fi
+  ln -sfn "$top" "$R/opt/spft-current"
+  echo ">> installed: $dest"
+  echo ">> it is now the one that starts (/opt/spft-current -> $top)"
+}
+
+# --- SP Flash Tool: finding or downloading the zip (as the normal Termux user) ---------------------------
+
+UA='Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36'
+TOOL_ZIP=
+
+tool_entries() { awk -v n="$1" '!/^[[:space:]]*(#|$)/ && $1 == n { print $2, $3 }' "$LIB/tools.conf"; }
+
+default_tool() {
+  if [ -n "${SPFT_TOOL:-}" ]; then printf '%s\n' "$SPFT_TOOL"; return 0; fi
+  awk '!/^[[:space:]]*(#|$)/ { print $1; exit }' "$LIB/tools.conf"
+}
+
+tool_list() {
+  echo "SP Flash Tool versions spft can download (lib/tools.conf):"
+  awk '!/^[[:space:]]*(#|$)/ && !seen[$1]++ { printf "  %-9s %s\n", $1, ($2 == "-" ? "(no checksum known)" : "(checksum known)") }' "$LIB/tools.conf"
+  echo "default: $(default_tool)"
+  echo "  spft tool NAME        install another one         spft tool FILE.zip    install a zip you already have"
+}
+
+note_hash() { # note_hash FILE   print its checksum, and whether lib/tools.conf knows it
+  local sha name
+  sha=$(sha256sum "$1" 2>/dev/null | cut -d' ' -f1) || return 0
+  [ -n "$sha" ] || return 0
+  name=$(awk -v s="$sha" '$2 == s { print $1; exit }' "$LIB/tools.conf")
+  if [ -n "$name" ]; then
+    echo "   sha256 $sha  = SP Flash Tool $name, as recorded in tools.conf"
+  else
+    echo "   sha256 $sha  (not in tools.conf - fine if you trust where you got it)"
+  fi
+}
+
+check_zip() { # check_zip FILE SHA|-   a valid zip; when SHA is given, the checksum must match
+  local got
+  got=$(sha256sum "$1" | cut -d' ' -f1)
+  echo "   sha256 $got"
+  if [ "$2" != - ]; then
+    if [ "$got" != "$2" ]; then
+      echo "   !! checksum mismatch - this is not the file that was expected (it should be $2)"
+      echo "      The mirror may have re-packed it, or the download was damaged or changed on the way."
+      return 1
+    fi
+    echo "   checksum matches lib/tools.conf"
+  else
+    echo "   (no checksum is known for this file, so it can't be compared)"
+  fi
+  if ! unzip -tq "$1" >/dev/null 2>&1; then
+    echo "   !! that is not a complete zip file"
+    return 1
+  fi
+}
+
+download_zip() { # download_zip URL SHA OUT   0 when OUT now holds a good zip
+  rm -f "$3.part"
+  # the same flags as the Arch Linux packages use for this site (-b "" keeps cookies across redirects), plus a browser name
+  if curl -gfL -b "" --retry 3 --retry-delay 3 --connect-timeout 20 -A "$UA" -e "$1" -# -o "$3.part" "$1" </dev/null &&
+    check_zip "$3.part" "$2"; then
+    mv -f "$3.part" "$3"
+    return 0
+  fi
+  rm -f "$3.part"
+  return 1
+}
+
+fetch_tool() { # fetch_tool NAME   download it into $DL (sets TOOL_ZIP); 1 when none of its addresses worked
+  local name=$1 sha url n=0 out=$DL/SP_Flash_Tool_${1}_Linux.zip
+  mkdir -p "$DL"
+  while read -r sha url; do
+    n=$((n + 1))
+    if [ -s "$out" ]; then
+      echo ">> found an earlier download: $out"
+      if check_zip "$out" "$sha"; then TOOL_ZIP=$out; return 0; fi
+      rm -f "$out"
+    fi
+    echo ">> downloading SP Flash Tool $name"
+    echo "   $url"
+    if download_zip "$url" "$sha" "$out"; then TOOL_ZIP=$out; return 0; fi
+    echo "   that address did not work"
+  done < <(tool_entries "$name")
+  [ "$n" -gt 0 ] || die "tool: '$name' is not a known version (spft tool list)"
+  return 1
+}
+
+local_zip() { # local_zip NAME   a Linux SP Flash Tool zip in the phone's Download folder
+  local d f
+  for d in "$HOME/storage/downloads" /sdcard/Download /storage/emulated/0/Download; do
+    [ -d "$d" ] || continue
+    for f in "$d/SP_Flash_Tool_${1}_Linux.zip" "$d"/SP_Flash_Tool*[Ll]inux*.zip; do
+      if [ -f "$f" ]; then printf '%s\n' "$f"; return 0; fi
+    done
+  done
+  root_call root-find-zip "$1" 2>/dev/null # Termux may not be allowed to read shared storage, root can
+}
+
+tool_help() { # tool_help NAME   what to do when the automatic download did not work
+  cat >&2 <<EOF
+
+>> SP Flash Tool could not be downloaded automatically (no connection, or the mirror is down or has changed).
+   Do it by hand instead - it takes a minute:
+   1. In your phone's browser download  SP_Flash_Tool_$1_Linux.zip  - the LINUX build, not the Win one.
+      Where to get it is listed in the README ("If the download fails").
+   2. Leave it in your Download folder.
+   3. In Termux run:  spft tool
+EOF
+}
+
+cmd_tool() { # cmd_tool [list|--if-missing|FILE.zip|URL|NAME]
+  ! is_root || die "run tool from Termux as a normal user (it calls su itself)"
+  need_lib
+  local arg=${1:-} name='' zip='' out quiet=0
+  case $arg in
+    list) tool_list; return 0 ;;
+    --if-missing)   # what `spft install` uses: it prints its own last line
+      need_su
+      if root_call root-tool-where >/dev/null 2>&1; then echo ">> SP Flash Tool is already installed"; return 0; fi
+      quiet=1; arg= ;;
+  esac
+  need_su
+  command -v curl >/dev/null 2>&1 || die "curl is missing - run: pkg install curl"
+  command -v unzip >/dev/null 2>&1 || die "unzip is missing - run: pkg install unzip"
+  case $arg in
+    '') name=$(default_tool) ;;
+    http://* | https://*)
+      mkdir -p "$DL"
+      out=$DL/SP_Flash_Tool_custom_Linux.zip
+      echo ">> downloading $arg"
+      download_zip "$arg" "${SPFT_TOOL_SHA256:--}" "$out" || die "that download did not work"
+      zip=$out ;;
+    *.zip | */*)
+      zip=$arg
+      if [ -f "$zip" ]; then
+        zip=$(cd "$(dirname "$zip")" && pwd)/$(basename "$zip")
+        echo ">> using $zip"
+        note_hash "$zip"
+      fi ;;
+    *) name=$arg ;;
+  esac
+  if [ -z "$zip" ]; then
+    zip=$(local_zip "$name") || zip=
+    if [ -n "$zip" ]; then
+      echo ">> using the zip that is already on your phone: $zip"
+      note_hash "$zip"
+    elif fetch_tool "$name"; then
+      zip=$TOOL_ZIP
+    else
+      tool_help "$name"
+      return 1
+    fi
+  fi
+  # "|| return 1" is needed: when the caller runs this function in an `||` list (spft install does), the shell
+  # ignores `set -e` in here, and a failed unpack would still print "installed" below.
+  root_call root-tool "$zip" || return 1
+  if [ "$quiet" = 0 ]; then
+    echo
+    echo ">> SP Flash Tool is installed. Start it with:  spft"
+  fi
+}
+
+# --- setting up Debian ---------------------------------------------------------------------------------
+
+root_check() {
+  unset LD_LIBRARY_PATH LD_PRELOAD
+  local free sdk rel abis where
+  case "$(kernel_arch)" in
+    64) row kernel "64-bit ARM (CONFIG_ARM64=y) - OK, a 32-bit Android userspace doesn't matter" ;;
+    32) row kernel "NOT a 64-bit ARM kernel - box64 needs one (use another host phone, or mtkclient)" ;;
+    *) row kernel "unknown (no /proc/config.gz) - 'spft install' will test it" ;;
+  esac
+  if [ -d /sys/bus/usb/drivers/cdc_acm ]; then
+    row cdc_acm "present - OK (the USB serial driver SP Flash Tool talks through)"
+  else
+    case "$(acm_config)" in
+      m) row cdc_acm "NOT LOADED - this kernel has the driver as a module. Try:  su -c 'modprobe cdc_acm'  and run spft check again" ;;
+      n) row cdc_acm "MISSING - this kernel was built without it (CONFIG_USB_ACM), so SP Flash Tool can't see a device from this phone (use mtkclient instead)" ;;
+      y) row cdc_acm "not found, although the kernel config says it is built in. If the target is never detected, use another host phone (or mtkclient)" ;;
+      *) row cdc_acm "not found, and the kernel config can't be read to tell why. If the target is never detected, use another host phone (or mtkclient)" ;;
+    esac
+  fi
+  if find_chroot; then row chroot "$CHROOT"; else row chroot "NOT FOUND"; fi
+  sdk=$(getprop ro.build.version.sdk 2>/dev/null || true)
+  rel=$(getprop ro.build.version.release 2>/dev/null || true)
+  abis=$(getprop ro.product.cpu.abilist 2>/dev/null || true)
+  row android "${rel:-unknown} (API ${sdk:-?}), ABIs: ${abis:-?}"
+  free=$(free_mb /data)
+  if [ -n "$free" ]; then row free "$free MB on /data (the install needs about 3000)"; fi
+  if [ -x "$R/bin/bash" ]; then row debian "installed in $R"; else row debian "NOT installed - run: spft install"; fi
+  if [ -x "$R/usr/local/bin/box64" ] || [ -x "$R/usr/bin/box64" ]; then row box64 "installed"; else row box64 "missing - run: spft install"; fi
+  if where=$(root_tool_where); then row tool "${where#"$R"}"; else row tool "NOT installed - run: spft tool"; fi
+  case $sdk in
+    '' | *[!0-9]*) ;;
+    *) if [ "$sdk" -ge 31 ]; then
+      echo
+      echo "Android 12 or newer: Android may kill background processes. If SP Flash Tool or Termux closes by"
+      echo "itself, see the README, section \"Android 12 and newer\"."
+    fi ;;
+  esac
+}
+
+cmd_check() {
+  if is_root; then root_check; return 0; fi
+  echo "== Termux =="
+  local rc
+  if command -v su >/dev/null 2>&1; then row root "su found"; else row root "NOT FOUND - this needs a rooted phone (Magisk, KernelSU, ...)"; fi
+  if command -v termux-x11 >/dev/null 2>&1; then row x11-pkg "installed"; else row x11-pkg "MISSING - run: pkg install x11-repo && pkg install termux-x11-nightly"; fi
+  rc=0
+  app_installed com.termux.x11 || rc=$?
+  case $rc in
+    0) row x11-app "Termux:X11 app installed" ;;
+    1) row x11-app "NOT installed - get termux-x11-universal-debug.apk: https://github.com/termux/termux-x11/releases/tag/nightly" ;;
+    *) row x11-app "could not tell (open the Termux:X11 app once to check)" ;;
+  esac
+  if [ -d "$HOME/storage/downloads" ]; then row storage "Termux can read your Download folder"; else row storage "run termux-setup-storage once if you want Termux to see your Download folder (optional)"; fi
+  echo "== phone and Debian =="
+  command -v su >/dev/null 2>&1 || return 1
+  as_root check
+}
+
+write_provision() {
+  need_lib
+  cp -f "$LIB/provision.sh" "$R/root/spft-provision.sh"
+  chmod 755 "$R/root/spft-provision.sh"
+}
+
+root_install() { # root_install TARBALL
+  is_root || die "internal: needs root"
+  local sig
+  # the marker file proves a previous unpack ran to the end (an interrupted one is simply redone)
+  if [ -e "$R/.spft-unpacked" ]; then
+    echo ">> rootfs already unpacked in $R"
+  else
+    echo ">> unpacking rootfs into $R"
+    mkdir -p "$R"
+    env LD_LIBRARY_PATH="$PREFIX/lib" PATH="$PREFIX/bin:$PATH" "$PREFIX/bin/tar" -xpf "$1" -C "$R" --numeric-owner
+    : > "$R/.spft-unpacked"
+  fi
+  find_chroot || die "no chroot command found (tried /system/bin, /system/xbin and Termux)"
+  if ! err=$(chroot_run /bin/true 2>&1); then
+    die "the arm64 Debian won't run on this phone: $err (run: spft check)"
+  fi
+  rm -f "$R/etc/resolv.conf"
+  printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' > "$R/etc/resolv.conf"
+  mkdir -p "$R/etc/apt/apt.conf.d" "$R/root" "$R/mnt/sdcard" "$R/opt"
+  # Android: apt's unprivileged _apt user has no network access, so let apt download as root
+  echo 'APT::Sandbox::User "root";' > "$R/etc/apt/apt.conf.d/01-android-nosandbox"
+  write_provision
+  # the provisioning only runs again when lib/provision.sh has changed since it last finished
+  sig=$(cksum < "$LIB/provision.sh")
+  if [ -f "$R/.spft-provisioned" ] && [ "$(cat "$R/.spft-provisioned")" = "$sig" ]; then
+    echo ">> Debian is already set up (box64, libraries, desktop)"
+  else
+    root_enter /root/spft-provision.sh
+    if [ -e "$R/root/.spft-selftest-failed" ]; then
+      echo ">> the box64 self-test failed, so Debian is not marked as set up (the next 'spft install' tries again)"
+      return 3
+    fi
+    printf '%s\n' "$sig" > "$R/.spft-provisioned"
+  fi
+}
+
+cmd_install() { # cmd_install [--no-tool]
+  ! is_root || die "run install from Termux as a normal user (it calls su itself)"
+  local want_tool=1 a free
+  for a in "$@"; do
+    case $a in
+      --no-tool) want_tool=0 ;;
+      *) die "install: unknown option '$a'  (the only option is --no-tool)" ;;
+    esac
+  done
+  need_lib
+  need_su
+  say "checking root"
+  root_ok || die "root was refused. Open your root app (Magisk, KernelSU, ...), allow Termux, then run this again"
+  case "$(kernel_arch)" in
+    32) die "this phone's kernel is not a 64-bit ARM kernel, so the 64-bit emulator (box64) can't run here. Use a phone or tablet with a 64-bit kernel as the host, or stay with mtkclient." ;;
+    64) echo ">> kernel is 64-bit ARM - OK (a 32-bit Android userspace and 32-bit Termux don't matter)" ;;
+    *) echo ">> can't read /proc/config.gz - will test 64-bit support after unpacking" ;;
+  esac
+  free=$(free_mb "$PREFIX")
+  if [ -n "$free" ]; then
+    if [ "$free" -lt "${SPFT_MIN_MB:-1500}" ]; then
+      die "only $free MB are free on the phone's storage, and the install needs about 3000. Free some space (delete apps, photos or old downloads) and run this again."
+    elif [ "$free" -lt 3000 ]; then
+      echo ">> $free MB are free - that is tight (about 3000 are needed). If the install stops with 'No space left on device', free some space and run it again."
+    fi
+  fi
+  wake_lock
+  pkg install -y wget curl xz-utils tar unzip coreutils || die "pkg could not install the Termux packages (try: termux-change-repo)"
+  mkdir -p "$DL"
+  if [ ! -s "$DL/rootfs.tar.gz" ]; then
+    say "downloading Debian $SUITE arm64 (about 30 MB)"
+    if ! wget -O "$DL/rootfs.part" "$URL"; then
+      rm -f "$DL/rootfs.part"
+      die "could not download Debian from $URL - check the internet connection, then run: spft install"
+    fi
+    mv "$DL/rootfs.part" "$DL/rootfs.tar.gz"
+  fi
+  [ "$(wc -c < "$DL/rootfs.tar.gz")" -gt 10000000 ] ||
+    die "$DL/rootfs.tar.gz is too small to be a rootfs - delete it, or set SPFT_URL to a Debian arm64 rootfs tarball"
+  say "setting up Debian: box64, libraries, desktop (15-30 minutes the first time)"
+  local rc=0
+  root_call root-install "$DL/rootfs.tar.gz" || rc=$?
+  case $rc in
+    0 | 3) ;;
+    *) die "setting up Debian failed (exit $rc) - read the messages above, then run: spft install" ;;
+  esac
+  local tool_ok=1
+  if [ "$want_tool" = 1 ]; then
+    say "SP Flash Tool"
+    # in a subshell: a `die` inside must not end the whole install, Debian is already set up at this point
+    (cmd_tool --if-missing) || tool_ok=0
+  fi
+  if [ "$rc" = 3 ]; then
+    say "Debian is set up, but the box64 self-test FAILED (see above): SP Flash Tool will not start until it passes."
+    echo "   Run 'spft install' to try again, and 'spft check' to look at the phone."
+    return 1
+  fi
+  if [ "$tool_ok" = 0 ]; then
+    say "Debian is ready, but SP Flash Tool is NOT installed yet."
+    echo "   Follow the steps above to get the zip, then run:  spft tool"
+    echo "   After that, start it with:  spft"
+    return 1
+  fi
+  say "done. Start SP Flash Tool with:  spft"
+}
+
+cmd_update() {
+  ! is_root || die "run update from Termux as a normal user"
+  command -v git >/dev/null 2>&1 || die "git is missing - run: pkg install git"
+  [ -d "$SPFT_HOME/.git" ] || die "this copy of spft was not made with git clone, so it can't update itself - clone the repository again (see the README)"
+  say "getting the newest spft"
+  git -C "$SPFT_HOME" pull --ff-only
+  say "applying it"
+  exec "$PREFIX/bin/bash" "$SELF" install
+}
+
+# --- Termux:X11 display: landscape, fullscreen, bigger ------------------------------------------------
+# `termux-x11-preference` changes the Termux:X11 app's own settings while it runs. Its exit status can say "ok"
+# for a value the app refused, and one refused key throws away the whole batch. So: one key per call, then
+# read every setting back with `list` and check.
+X11_KEYS="fullscreen forceOrientation displayScale displayResolutionMode displayFilteringMode additionalKbdVisible"
+X11_CUR=
+X11_BAD=
+
+x11_list() { timeout 6 termux-x11-preference list 2>/dev/null || true; }
+x11_get() { printf '%s\n' "$X11_CUR" | sed -n "s/^\"$1\"=\"\\(.*\\)\"\$/\\1/p" | head -n 1; }
+
+x11_open() { # bring the Termux:X11 app to the front (it starts if it was closed)
+  am start --user 0 -n com.termux.x11/com.termux.x11.MainActivity >/dev/null 2>&1 ||
+    echo ">> could not open the Termux:X11 app by itself - open it from the launcher"
+}
+
+x11_wait() { # wait for the app to answer (it takes a moment after opening); its settings end up in X11_CUR
+  for _ in 1 2 3 4 5 6 7 8; do
+    X11_CUR=$(x11_list)
+    case $X11_CUR in *'"fullscreen"="'*) return 0 ;; esac
+    sleep 1
+  done
+  return 1
+}
+
+x11_save() { # remember the settings as they were, once, so that `x11 reset` can put them back
+  local f=$DL/x11-prefs.orig k v
+  [ ! -f "$f" ] || return 0
+  mkdir -p "$DL"
+  for k in $X11_KEYS; do
+    v=$(x11_get "$k")
+    if [ -n "$v" ]; then printf '%s:%s\n' "$k" "$v"; fi
+  done > "$f"
+}
+
+x11_apply() { # x11_apply key:value ...   set what differs; returns 1 when something could not be set
+  local a k v cur changed=0 bad=
+  for a in "$@"; do
+    k=${a%%:*}; v=${a#*:}
+    cur=$(x11_get "$k")
+    [ -n "$cur" ] || continue              # this Termux:X11 version does not have that setting
+    [ "$cur" != "$v" ] || continue
+    x11_save
+    echo "   $k: $cur -> $v"
+    timeout 15 termux-x11-preference "$a" >/dev/null 2>&1 || true
+    changed=1
+  done
+  if [ "$changed" -eq 1 ]; then sleep 1; X11_CUR=$(x11_list); fi    # read it all back
+  for a in "$@"; do
+    k=${a%%:*}; v=${a#*:}
+    if [ -z "$(x11_get "$k")" ]; then bad="$bad $k(not in this app version)"
+    elif [ "$(x11_get "$k")" != "$v" ]; then bad="$bad $k"
+    fi
+  done
+  X11_BAD=$bad
+  if [ -z "$bad" ]; then return 0; fi
+  echo "   not applied:$bad" >&2
+  return 1
+}
+
+x11_manual() { # x11_manual ORIENTATION ZOOM: the same thing by hand
+  cat >&2 <<EOF
+   By hand instead: in the Termux:X11 app open Preferences > Output and set
+     Screen orientation = $1    Fullscreen = on    Display resolution mode = scaled    Display scale, % = $2
+EOF
+}
+
+x11_layout() { # x11_layout ORIENTATION ZOOM KEYS: rotate, fill the screen, enlarge, hide the extra-keys bar
+  local orient=$1 zoom=$2 keys=$3 filt=bilinear
+  if [ $((zoom % 100)) -eq 0 ]; then filt=nearest; fi    # a whole-number zoom stays sharp without smoothing
+  if ! command -v termux-x11-preference >/dev/null 2>&1; then
+    echo ">> termux-x11-preference is missing (try: pkg upgrade termux-x11-nightly), so the display can't be set up for you" >&2
+    x11_manual "$orient" "$zoom"
+    return 0
+  fi
+  echo ">> setting up the Termux:X11 display: $orient, fullscreen, zoom $zoom%"
+  if ! x11_wait; then
+    echo ">> the Termux:X11 app did not answer, so its settings were not changed" >&2
+    x11_manual "$orient" "$zoom"
+    return 0
+  fi
+  # additionalKbdVisible goes first: the app does not redraw when that one changes, but it does for each key after it
+  if ! x11_apply "additionalKbdVisible:$keys" "fullscreen:true" "forceOrientation:$orient" "displayScale:$zoom" \
+    "displayResolutionMode:scaled" "displayFilteringMode:$filt"; then
+    # the by-hand steps are only worth showing when one of the four that matter did not take
+    case $X11_BAD in *fullscreen* | *forceOrientation* | *displayScale* | *displayResolutionMode*) x11_manual "$orient" "$zoom" ;; esac
+  fi
+}
+
+x11_reset() { # put the settings back as x11_save found them
+  local f=$DL/x11-prefs.orig a args=()
+  if [ ! -f "$f" ]; then
+    echo ">> nothing to put back: spft has not changed the Termux:X11 settings"
+    return 0
+  fi
+  command -v termux-x11-preference >/dev/null 2>&1 || die "termux-x11-preference is missing (try: pkg upgrade termux-x11-nightly)"
+  x11_wait || die "the Termux:X11 app did not answer - open it, then run this again"
+  while IFS= read -r a || [ -n "$a" ]; do
+    if [ -n "$a" ]; then args+=("$a"); fi
+  done < "$f"
+  echo ">> putting the Termux:X11 settings back as they were"
+  if [ "${#args[@]}" -eq 0 ] || x11_apply "${args[@]}"; then
+    rm -f "$f"
+    echo ">> done"
+  else
+    echo ">> kept $f because something could not be put back" >&2
+  fi
+}
+
+cmd_x11() { # cmd_x11 [options]: Termux:X11 server and app as the normal Termux user, then the tool inside Debian
+  ! is_root || die "run spft from Termux as a normal user (it calls su itself)"
+  local orient=landscape zoom='' zgiven=0 keys=false action=layout a
+  for a in "$@"; do
+    case $a in
+      landscape) orient=landscape ;;
+      reverse) orient="reverse landscape" ;;
+      portrait|auto) orient=$a ;;
+      zoom=*) zoom=${a#zoom=}; zgiven=1 ;;
+      keys) keys=true ;;
+      plain|reset) action=$a ;;
+      *) die "x11: unknown option '$a'  (options: reverse portrait auto zoom=N keys plain reset)" ;;
+    esac
+  done
+  if [ "$zgiven" = 0 ]; then    # the tool is wider than a portrait screen, so it only gets zoomed in landscape
+    case $orient in portrait | auto) zoom=100 ;; *) zoom=150 ;; esac
+  fi
+  case $zoom in '' | *[!0-9]*) die "x11: zoom=N needs a whole number, for example zoom=150" ;; esac
+  [ "${#zoom}" -le 3 ] || die "x11: zoom must be between 30 and 300"
+  zoom=$((10#$zoom))
+  if [ "$zoom" -lt 30 ] || [ "$zoom" -gt 300 ]; then die "x11: zoom must be between 30 and 300"; fi
+  need_su
+  command -v termux-x11 >/dev/null 2>&1 ||
+    die "termux-x11 is not installed. In Termux run:  pkg install x11-repo  and then  pkg install termux-x11-nightly
+     (and install the Termux:X11 app: the file termux-x11-universal-debug.apk from
+      https://github.com/termux/termux-x11/releases/tag/nightly - or run: bash install.sh)"
+  if [ "$action" = reset ]; then
+    x11_open
+    x11_reset
+    return 0
+  fi
+  # Note: no test of the Debian folder here. The normal Termux user may not look inside it; the root step checks.
+  local sock=$PREFIX/tmp/.X11-unix/X0 n=0
+  if [ ! -S "$sock" ]; then
+    echo ">> starting the Termux:X11 server"
+    mkdir -p "$DL"
+    nohup termux-x11 :0 >"$DL/x11.log" 2>&1 &
+    while [ ! -S "$sock" ] && [ "$n" -lt 20 ]; do sleep 1; n=$((n + 1)); done
+    if [ ! -S "$sock" ]; then
+      tail -n 10 "$DL/x11.log" >&2
+      die "the Termux:X11 server did not start (is the Termux:X11 app installed? see the messages above)"
+    fi
+  fi
+  x11_open
+  if [ "$action" = layout ]; then x11_layout "$orient" "$zoom" "$keys"; fi
+  wake_lock    # keeps the CPU awake while the tool runs: a phone that falls asleep in the middle of a flash can ruin it
+  as_root enter SPFT_DISPLAY=x11 spft-run
+}
+
+cmd_vnc() {
+  ! is_root || die "run spft from Termux as a normal user (it calls su itself)"
+  need_su
+  wake_lock
+  as_root enter SPFT_DISPLAY=vnc spft-run
+}
+
+# The Termux:X11 server renames its process "termux-x11 <app id> :0" (its README: "pkill -f termux-x11"). Prints the PID
+# of every one of them that this Termux user can see.
+x11_server_pids() {
+  local p c
+  for p in /proc/[0-9]*; do
+    c=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
+    case $c in *"termux-x11 "*) echo "${p#/proc/}" ;; esac
+  done
+  return 0
+}
+
+# Stop the Termux:X11 server, so that the next `spft` starts a fresh one, and remove the socket file that a server
+# which was killed (by Android, say) leaves behind: with that file in the way spft thinks a server is running and the
+# screen stays black.
+x11_server_stop() {
+  local pids sock=$PREFIX/tmp/.X11-unix/X0
+  pids=$(x11_server_pids)
+  if [ -n "$pids" ]; then
+    # shellcheck disable=SC2086
+    kill $pids 2>/dev/null || true
+    sleep 1
+    echo "stopped the Termux:X11 server"
+  fi
+  if [ -S "$sock" ]; then
+    rm -f "$sock"
+    if [ -z "$pids" ]; then echo "removed an old Termux:X11 socket (no server was running)"; fi
+  fi
+  return 0
+}
+
+cmd_stop() {
+  if is_root; then root_stop; return 0; fi
+  need_su
+  root_call stop || true
+  x11_server_stop
+  wake_unlock
+}
+
+cmd_uninstall() { # cmd_uninstall [--yes]
+  ! is_root || die "run uninstall from Termux as a normal user (it calls su itself)"
+  local yes=0 a answer=''
+  for a in "$@"; do
+    case $a in
+      --yes | -y) yes=1 ;;
+      *) die "uninstall: unknown option '$a'  (the only option is --yes)" ;;
+    esac
+  done
+  need_su
+  echo "This deletes the Debian system in $R (SP Flash Tool, box64 and everything else inside it)"
+  echo "and the downloads in $DL. It stops SP Flash Tool if it is running."
+  echo "Your own files in the phone's storage are NOT touched. The spft command and its folder stay."
+  if [ "$yes" = 0 ]; then
+    printf 'Type yes and press Enter to continue: '
+    read -r answer || answer=
+    if [ "$answer" != yes ]; then echo "cancelled - nothing was deleted"; return 1; fi
+  fi
+  root_call root-uninstall || die "the Debian folder was NOT deleted (see above)"
+  # the downloads: only the files spft itself makes, never the whole folder (SPFT_DL could point anywhere)
+  if [ -f "$DL/app/spft" ]; then rm -rf "$DL/app"; fi
+  rm -f "$DL/rootfs.tar.gz" "$DL/rootfs.part" "$DL/x11.log" "$DL/x11-prefs.orig" "$DL"/SP_Flash_Tool_*.zip "$DL"/*.part
+  rmdir "$DL" 2>/dev/null || true
+  wake_unlock
+  say "removed. To remove spft itself as well, run:  rm -rf \"$SPFT_HOME\" \"$PREFIX/bin/spft\""
+}
+
+case "${1:-}" in
+  "") cmd_x11 ;;
+  start | x11) shift; cmd_x11 "$@" ;;
+  vnc) cmd_vnc ;;
+  stop) cmd_stop ;;
+  tool) shift; cmd_tool "$@" ;;
+  check) cmd_check ;;
+  install) shift; cmd_install "$@" ;;
+  update) cmd_update ;;
+  enter) shift; is_root || as_root enter "$@"; root_enter "$@" ;;
+  umount) is_root || as_root umount; root_umount ;;
+  uninstall) shift; cmd_uninstall "$@" ;;
+  help | -h | --help) usage ;;
+  root-check) root_check ;;
+  root-uninstall) root_uninstall ;;
+  root-install) root_install "${2:?tarball path missing}" ;;
+  root-tool) root_tool "${2:?zip path missing}" ;;
+  root-tool-where) root_tool_where ;;
+  root-find-zip) root_find_zip "${2:?name missing}" ;;
+  *) usage >&2; exit 1 ;;
+esac
