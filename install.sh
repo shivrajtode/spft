@@ -28,13 +28,12 @@ say "root: if your root app asks, press ALLOW for Termux"
 [ "$(su -c 'id -u' 2>/dev/null || true)" = 0 ] ||
   die "root was refused. Open your root app (Magisk, KernelSU, APatch ...) and allow Termux (with KernelSU or APatch: switch Termux on in the Superuser list), then run this again"
 
-have_app() { # have_app PACKAGE  ->  0 installed, 1 not installed, 2 can't tell
-  local pm all
-  pm=$(command -v pm 2>/dev/null || echo /system/bin/pm)
-  all=$(timeout 25 "$pm" list packages 2>/dev/null || true)
-  [ -n "$all" ] || return 2
-  case $all in *"package:$1"$'\n'* | *"package:$1") return 0 ;; esac
-  return 1
+# have_app PACKAGE  ->  0 installed, 1 not installed, 2 can't tell. Root is asked (spft app-installed): since Android 11 a
+# normal app such as Termux is not shown the other apps, and `pm list packages` run from Termux leaves out Termux:X11.
+have_app() {
+  local rc=0
+  bash "$HERE/spft" app-installed "$1" || rc=$?
+  return "$rc"
 }
 
 if command -v termux-wake-lock >/dev/null 2>&1; then termux-wake-lock >/dev/null 2>&1 || true; fi
@@ -52,14 +51,14 @@ say "2/4  the Termux:X11 app"
 x11_app=0
 have_app com.termux.x11 || x11_app=$?
 case $x11_app in
-  0) echo "Termux:X11 app: installed" ;;
+  0) echo "Termux:X11 app: installed (spft does not mind where you got it: GitHub nightly, F-Droid, ...)" ;;
   1) cat <<'EOF'
-Termux:X11 app: NOT INSTALLED yet. It is the screen SP Flash Tool is shown on. Install it before you start the tool:
-   https://github.com/termux/termux-x11/releases/tag/nightly   (download termux-x11-universal-debug.apk)
+Termux:X11 app: not found. It is the screen SP Flash Tool is shown on. Install it before you start the tool, for example
+   the nightly APK from https://github.com/termux/termux-x11/releases/tag/nightly   (file: termux-x11-universal-debug.apk)
 EOF
   ;;
-  *) echo "Termux:X11 app: could not tell if it is installed. If it is not, get it from"
-     echo "   https://github.com/termux/termux-x11/releases/tag/nightly   (termux-x11-universal-debug.apk)" ;;
+  *) echo "Termux:X11 app: could not tell if it is installed (Android hides other apps from Termux). If it is not, get it from"
+     echo "   https://github.com/termux/termux-x11/releases/tag/nightly   (file: termux-x11-universal-debug.apk)" ;;
 esac
 
 say "3/4  the spft command"

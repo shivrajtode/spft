@@ -1,40 +1,173 @@
 #!/bin/bash
 # Runs INSIDE the Debian chroot, as root.
 # Installs box64, x86_64 libraries and a VNC desktop so SP Flash Tool v5 can run.
+#
+# It shows what it is doing all the time. The slow parts count their files and print a "still working" line,
+# because a step that stays quiet for a few minutes looks like a hang (and apt IS quiet while it reads its package
+# lists, and while dpkg unpacks, on a slow tablet).
 set -eu
 export DEBIAN_FRONTEND=noninteractive
 export LANG=C.UTF-8
 
+STEPS=4
+STEP=starting
+n=0
+BEAT=${SPFT_BEAT:-20}   # seconds between "still working" lines
+POLL=${SPFT_POLL:-5}    # seconds between download progress lines
+ARCHIVES=/var/cache/apt/archives
+
 say() { printf '\n>> %s\n' "$*"; }
+step() { n=$((n + 1)); STEP=$1; printf '\n>> [%d/%d] %s\n' "$n" "$STEPS" "$1"; }
+# if anything stops the setup: say where, and that running `spft install` again carries on
+trap 'rc=$?; if [ "$rc" != 0 ]; then printf "\n!! The setup stopped in step: %s (exit status %s).\n   Read the last messages above. Then run  spft install  again: it carries on, and what was already downloaded is kept.\n" "$STEP" "$rc"; fi' EXIT
+
+# --- progress display ---------------------------------------------------------------------------------------
+
+secs() { local s=$((SECONDS - $1)); printf '%dm%02ds' $((s / 60)) $((s % 60)); }
+mb() { awk -v b="$1" 'BEGIN { printf "%.1f", b / 1000000 }'; }   # bytes -> MB, the way apt counts (1 MB = 1,000,000 bytes)
+
+# beat WHAT COMMAND...   run COMMAND; while it runs, print "... WHAT: still working (1m20s)" every $BEAT seconds. The exit
+# status is the command's. (Pass programs, or functions that handle their own errors: `set -e` is off inside a function
+# that is called like this.)
+beat() {
+  local what=$1 t0=$SECONDS hb rc=0
+  shift
+  ( while :; do sleep "$BEAT" >/dev/null 2>&1 || exit 0; echo "   ... $what: still working ($(secs "$t0"))"; done ) &
+  hb=$!
+  "$@" || rc=$?
+  { kill "$hb" && wait "$hb"; } 2>/dev/null || true
+  return "$rc"
+}
+
+# apt, always with retries (a mobile connection drops now and then) and without colours
+aptq() { apt-get -y --no-install-recommends -o Acquire::Retries=3 -o APT::Color=0 "$@"; }
+
+apt_update() { beat "reading the package lists from the Debian servers" aptq update; }
+
+# apt_plan [--skip-unknown] PACKAGE...   one dry run (not one per package: that is minutes on a slow tablet).
+# Sets PLAN_PKGS (the names to install), PLAN_N (how many packages that means) and PLAN_LIST/PLAN_FILES/PLAN_BYTES
+# (the files to download: "name size" lines, how many, how many bytes).
+apt_plan() {
+  local skip=0 names out bad badline p keep tries=0
+  if [ "${1:-}" = --skip-unknown ]; then skip=1; shift; fi
+  names=$*
+  while :; do
+    # shellcheck disable=SC2086
+    if out=$(aptq install -s $names 2>&1); then break; fi
+    # names this Debian does not have: "E: Unable to locate package X" / "E: Package 'X' has no installation candidate"
+    bad=$(printf '%s\n' "$out" | sed -n -e 's/^E: Unable to locate package \(.*\)$/\1/p' -e "s/^E: Package '\\([^']*\\)' has no installation candidate\$/\\1/p")
+    tries=$((tries + 1))
+    if [ "$skip" = 0 ] || [ -z "$bad" ] || [ "$tries" -gt 5 ]; then printf '%s\n' "$out" >&2; return 1; fi
+    keep=
+    badline=" $(printf '%s' "$bad" | tr '\n' ' ') "
+    for p in $names; do
+      case $badline in
+        *" $p "*) echo "   (this Debian does not have $p - skipped)" ;;
+        *) keep="$keep $p" ;;
+      esac
+    done
+    names=$keep
+    [ -n "$names" ] || { echo "no package is left to install" >&2; return 1; }
+  done
+  PLAN_PKGS=$names
+  PLAN_N=$(printf '%s\n' "$out" | grep -c '^Inst ' || true)
+  # the files to download: apt prints  'URL' FILE SIZE HASH  for each
+  # shellcheck disable=SC2086
+  PLAN_LIST=$(aptq install --print-uris $PLAN_PKGS 2>/dev/null | sed -n "s/^'[^']*' \\([^ ]*\\) \\([0-9][0-9]*\\) .*/\\1 \\2/p" || true)
+  PLAN_FILES=$(printf '%s\n' "$PLAN_LIST" | grep -c . || true)
+  PLAN_BYTES=$(printf '%s\n' "$PLAN_LIST" | awk '{ s += $2 } END { printf "%d", s }')
+}
+
+# downloaded so far, counted from the files apt has finished (in $ARCHIVES) and is writing (in $ARCHIVES/partial)
+fetch_progress() {
+  local f size got=0 files=0 sz
+  while read -r f size; do
+    [ -n "$f" ] || continue
+    if [ -f "$ARCHIVES/$f" ]; then
+      files=$((files + 1)); got=$((got + size))
+    elif [ -f "$ARCHIVES/partial/$f" ]; then
+      sz=$(stat -c %s "$ARCHIVES/partial/$f" 2>/dev/null || echo 0); got=$((got + sz))
+    fi
+  done <<EOF
+$PLAN_LIST
+EOF
+  awk -v g="$got" -v t="$PLAN_BYTES" -v f="$files" -v c="$PLAN_FILES" 'BEGIN {
+    p = (t > 0) ? int(g * 100 / t) : 0; if (p > 100) p = 100
+    printf "   downloaded %.1f of %.1f MB (%d%%) - %d of %d files\n", g / 1000000, t / 1000000, p, f, c }'
+}
+
+# download everything in PLAN_PKGS without installing it, with a progress line every $POLL seconds
+apt_fetch() {
+  local hb rc=0 t0=$SECONDS
+  if [ "$PLAN_FILES" -eq 0 ]; then echo "   nothing to download (the files are in the cache already)"; return 0; fi
+  echo "   downloading $PLAN_FILES files, $(mb "$PLAN_BYTES") MB. apt names each file below, and a progress line follows every $POLL seconds."
+  ( while :; do sleep "$POLL" >/dev/null 2>&1 || exit 0; fetch_progress; done ) &
+  hb=$!
+  # shellcheck disable=SC2086
+  aptq install -d $PLAN_PKGS || rc=$?
+  { kill "$hb" && wait "$hb"; } 2>/dev/null || true
+  [ "$rc" -eq 0 ] || return "$rc"
+  fetch_progress
+  echo "   download finished in $(secs "$t0")"
+}
+
+# unpack and set up the downloaded packages, counting them
+apt_setup() {
+  local rc=0
+  echo "   installing $PLAN_N packages: unpacking, then setting them up. No more downloading; the phone is busy, it is not stuck."
+  # shellcheck disable=SC2086
+  ( set -o pipefail
+    aptq install $PLAN_PKGS 2>&1 | awk -v total="$PLAN_N" '
+      /^\(Reading database/ { next }
+      /^Unpacking /  { u++; printf "   [%d/%d] %s\n", u, total, $0; fflush(); next }
+      /^Setting up / { s++; printf "   [%d/%d] %s\n", s, total, $0; fflush(); next }
+      { print; fflush() }' ) || rc=$?
+  return "$rc"
+}
+
+# apt_install [--skip-unknown] PACKAGE...   check the names, download (with progress), install (with a counter)
+apt_install() {
+  local t0=$SECONDS
+  echo "   checking what has to be installed (one quick check) ..."
+  apt_plan "$@" || return 1
+  if [ "$PLAN_N" -eq 0 ]; then echo "   everything is installed already"; return 0; fi
+  echo "   $PLAN_N packages to install"
+  apt_fetch || return 1
+  beat "unpacking and setting up the packages" apt_setup || return 1
+  echo "   done in $(secs "$t0")"
+}
+
+# --- the setup ------------------------------------------------------------------------------------------------
 
 # Android only lets group 3003 (inet) open sockets; keep those groups for any later user account.
 getent group aid_inet >/dev/null || groupadd -g 3003 aid_inet || true
 getent group aid_net_raw >/dev/null || groupadd -g 3004 aid_net_raw || true
 usermod -a -G aid_inet,aid_net_raw root || true
 
-say "base packages"
-apt-get update
-apt-get install -y --no-install-recommends ca-certificates wget gpg unzip xz-utils procps nano file \
+step "base packages"
+echo "   About 100 packages. Every part shows its progress; when it is quiet, a \"still working\" line comes every $BEAT seconds."
+apt_update
+apt_install ca-certificates wget gpg unzip xz-utils procps nano file \
   tigervnc-standalone-server tigervnc-common xauth x11-xkb-utils xkb-data x11-xserver-utils \
   openbox xterm fonts-dejavu-core
 
-say "arm64 + x86_64 libraries"
+step "arm64 + x86_64 libraries"
+echo "   This is the longest step (about 90 packages, several minutes on a slow tablet). It is NOT stuck when it is quiet:"
+echo "   the downloads show a progress line, the installing shows a counter, and \"still working\" lines fill the gaps."
 dpkg --add-architecture amd64
-apt-get update
+apt_update
 LIBS="libx11-6 libx11-xcb1 libxcb1 libxext6 libxrender1 libxi6 libxcursor1 libxrandr2 libxfixes3
 libxkbcommon0 libxkbcommon-x11-0 libxcb-xkb1 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0
 libxcb-render0 libxcb-render-util0 libxcb-shape0 libxcb-shm0 libxcb-sync1 libxcb-xfixes0 libxcb-xinerama0
 libxcb-util1 libfontconfig1 libfreetype6 libglib2.0-0 libdbus-1-3 libgl1 libegl1 libpng16-16
 libusb-1.0-0 libudev1 zlib1g libexpat1 libsm6 libice6"
-# keep only the names apt can actually resolve (Debian 13 renamed some libs with a t64 suffix)
-pick() { for p in "$@"; do if apt-get install -s -qq "$p" >/dev/null 2>&1; then echo "$p"; else echo "skip: $p" >&2; fi; done; }
+# Names that this Debian does not have (Debian 13 renamed some libraries) are skipped, and said so.
 # shellcheck disable=SC2046,SC2086
-apt-get install -y --no-install-recommends $(pick $LIBS) \
-  $(pick $(printf '%s:amd64 ' $LIBS) libstdc++6:amd64 libgcc-s1:amd64 libc6:amd64)
+apt_install --skip-unknown $LIBS $(printf '%s:amd64 ' $LIBS) libstdc++6:amd64 libgcc-s1:amd64 libc6:amd64
 
 build_box64() {
-  say "building box64 from source (10-20 min)"
-  apt-get install -y --no-install-recommends git cmake build-essential python3
+  say "building box64 from source (10-20 min; the percentages below are cmake's)"
+  apt_install git cmake build-essential python3
   rm -rf /root/box64-src
   git clone --depth 1 https://github.com/ptitSeb/box64 /root/box64-src
   mkdir /root/box64-src/build
@@ -55,26 +188,32 @@ Suites: ./
 Architectures: arm64
 Signed-By: /usr/share/keyrings/box64-archive-keyring.gpg
 SRC_EOF
-  apt-get update
-  apt-get install -y box64-android
+  apt_update
+  apt_install box64-android
 }
 
-say "box64"
+step "box64"
 if ! box64 --version >/dev/null 2>&1; then
   deb_box64 || dpkg --configure -a || true
   box64 --version >/dev/null 2>&1 || build_box64
 fi
 box64 --version
 
-say "self-test: running a tiny static x86_64 program through box64"
+step "self-test: running a tiny static x86_64 program through box64"
+# Takes the busybox program out of the busybox-static package and lets box64 run it. (The package also holds a text file
+# called busybox, in usr/share/initramfs-tools: it must not be taken for the program. That once made this test fail
+# although box64 was fine.)
 selftest() {
   rm -rf /tmp/bbtest && mkdir /tmp/bbtest && cd /tmp/bbtest || return 1
-  apt-get download busybox-static:amd64 >/dev/null 2>&1 || return 1
-  dpkg -x busybox-static_*_amd64.deb . || return 1
-  bb=$(find . -type f -name busybox | head -n1)
-  [ -n "$bb" ] || return 1
-  out=$(box64 "$bb" uname -m) || return 1
-  echo "busybox says machine = $out   (expected: x86_64)"
+  beat "downloading the test program" apt-get download busybox-static:amd64 ||
+    { echo "   could not download the test program (busybox-static:amd64): check the internet connection"; return 1; }
+  dpkg -x busybox-static_*_amd64.deb . || { echo "   could not unpack the test program"; return 1; }
+  # the real program: an executable file called busybox that is big (about 1 MB), not a config file
+  bb=$(find . -type f -name busybox -perm -u+x -size +100k | head -n1)
+  [ -n "$bb" ] || { echo "   there is no busybox program inside the package"; return 1; }
+  out=$(box64 "$bb" uname -m) || { echo "   box64 could not run $bb (see the box64 message above)"; return 1; }
+  echo "   busybox, run through box64, says: machine = $out   (expected: x86_64)"
+  [ "$out" = x86_64 ]
 }
 rm -f /root/.spft-selftest-failed
 if ! ( selftest ); then

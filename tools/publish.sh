@@ -10,6 +10,10 @@
 # https://github.com/login/device in your browser.
 #
 # It also writes your GitHub name into the README (the places that say YOUR-GITHUB-NAME).
+#
+# Running it again after an update is safe. If you edited a file on github.com after the last publish (a thank-you
+# line in the README, say), your edit is kept: GitHub's newer changes are merged in before anything is pushed. Only
+# when the very same lines changed on both sides does it stop; it then pushes nothing, changes nothing on GitHub, and says so.
 set -eu
 
 HERE=$(cd "$(dirname "$0")/.." && pwd)
@@ -66,6 +70,19 @@ say "GitHub: $owner/$name"
 if gh repo view "$owner/$name" >/dev/null 2>&1; then
   echo "the repository exists already - pushing to it"
   git remote get-url origin >/dev/null 2>&1 || git remote add origin "https://github.com/$owner/$name.git"
+  # GitHub can be AHEAD of this folder: you edited a file on github.com (or in the GitHub app) after the last publish.
+  # A plain push is refused then ("fetch first"), so bring that work in first. A merge keeps both: what is on GitHub
+  # and what is in this folder. (If the repository is still empty, the fetch finds nothing and is skipped.)
+  if git fetch -q origin "+refs/heads/main:refs/remotes/origin/main" 2>/dev/null && ! git merge-base --is-ancestor origin/main HEAD; then
+    echo "GitHub has changes that are not in this folder yet (an edit you made on github.com?). They are kept:"
+    git log --format='   %h %an: %s' HEAD..origin/main
+    if ! git merge --no-edit -q -m "Merge the changes made on GitHub" origin/main; then
+      git merge --abort 2>/dev/null || true
+      die "GitHub has a change that could not be joined with this update by itself (see the lines above).
+   Nothing was pushed and nothing on GitHub was changed: the join was cancelled and this folder is as it was.
+   Open github.com/$owner/$name, press History on the file that changed, and send what you see to whoever made this update."
+    fi
+  fi
   git push -u origin main
 else
   echo "creating the repository (public: others must be able to clone it)"
@@ -82,4 +99,8 @@ Anyone with a rooted Android phone can now install it in Termux with this one li
   pkg update -y && pkg install -y git && git clone https://github.com/$owner/$name ~/spft && bash ~/spft/install.sh
 
 and start it afterwards by typing:  spft
+
+To only CHECK a phone first (nothing is installed), they can paste this in Termux:
+
+  bash <(curl -fsSL https://raw.githubusercontent.com/$owner/$name/main/check.sh)
 DONE

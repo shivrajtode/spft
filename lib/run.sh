@@ -80,5 +80,38 @@ mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
 export BOX64_LD_LIBRARY_PATH="$d/lib:$d:/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu"
 [ -d "$d/plugins" ] && export QT_PLUGIN_PATH="$d/plugins"
 export BOX64_LOG="${BOX64_LOG:-1}"
+
+# SP Flash Tool v5 turns some new-enough kernels away with "Invalid linux kernel version" (see lib/kernelfix.sh).
+# For those kernels, and only for those, a tiny library tells the tool a version it accepts.
+#   SPFT_FAKE_KERNEL=auto (default)   only for the kernels the tool wrongly rejects
+#   SPFT_FAKE_KERNEL=off              never
+#   SPFT_FAKE_KERNEL=5.4.0            always show that version (for a kernel older than 4.19.14 that the tool refuses: at your own risk)
+LIBDIR=${SPFT_LIBDIR:-/usr/local/lib/spft}
+rm -f /tmp/spft-fake-kernel
+if [ -f "$LIBDIR/kernelfix.sh" ] && [ -f "$LIBDIR/kernelfix.so.b64" ]; then
+  # shellcheck source=lib/kernelfix.sh
+  . "$LIBDIR/kernelfix.sh"
+  real=$(uname -r)
+  if fake=$(kernelfix_show "$real" "${SPFT_FAKE_KERNEL:-auto}"); then
+    if [ -n "$fake" ]; then
+      if base64 -d "$LIBDIR/kernelfix.so.b64" > /tmp/spft-kernelfix.so 2>/dev/null && printf '%s\n' "$fake" > /tmp/spft-fake-kernel; then
+        export BOX64_LD_PRELOAD="/tmp/spft-kernelfix.so${BOX64_LD_PRELOAD:+:$BOX64_LD_PRELOAD}"
+        if [ "${SPFT_FAKE_KERNEL:-auto}" = auto ]; then
+          echo "kernel $real: SP Flash Tool v5 refuses kernels like this one by mistake (it seems to compare versions as text), so it is shown $fake."
+          echo "(to turn this off: SPFT_FAKE_KERNEL=off spft)"
+        else
+          echo "kernel $real: SP Flash Tool is shown the kernel version $fake, as SPFT_FAKE_KERNEL says."
+        fi
+      else
+        echo "(could not set up the kernel-version fix. If the tool says \"Invalid linux kernel version\", see docs/TROUBLESHOOTING.md)"
+      fi
+    fi
+  else
+    echo "SPFT_FAKE_KERNEL must be auto, off, or a version like 5.4.0 - ignoring '${SPFT_FAKE_KERNEL:-}'"
+  fi
+fi
+
+echo "box64 prints a few 'Cannot dlopen' / 'Error loading needed lib' lines at the start. They are normal."
+echo "Only a red BOX64 in front of 'Error:' is a real problem."
 echo "starting SP Flash Tool from $d (Ctrl+C to stop)"
 exec box64 "./$exe"

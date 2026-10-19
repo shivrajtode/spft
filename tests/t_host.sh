@@ -35,16 +35,41 @@ cat > "$T/bin/su" <<EOF
 cmd=\$(printf '%s' "\$2" | sed 's#SPFT_ROOT=$T/invisible#SPFT_ROOT=$T/root#')
 exec env FAKE_ROOT=1 sh -c "\$cmd"
 EOF
-# the kernel config: FAKE_ACM=y|m|n sets CONFIG_USB_ACM, FAKE_ACM=none makes the config unreadable
+# the kernel config: FAKE_ACM=y|m|n sets CONFIG_USB_ACM, FAKE_ACM=none makes the config unreadable,
+# FAKE_ARM64=0 makes it a 32-bit kernel
 cat > "$T/bin/zcat" <<'EOF'
 #!/bin/bash
 if [ "${1:-}" = /proc/config.gz ]; then
   [ "${FAKE_ACM:-}" != none ] || exit 1
-  echo "CONFIG_ARM64=y"
+  if [ "${FAKE_ARM64:-1}" = 0 ]; then echo "# CONFIG_ARM64 is not set"; else echo "CONFIG_ARM64=y"; fi
   case ${FAKE_ACM:-} in y | m) echo "CONFIG_USB_ACM=$FAKE_ACM" ;; n) echo "# CONFIG_USB_ACM is not set" ;; esac
   exit 0
 fi
 exec /usr/bin/env PATH=/usr/bin:/bin zcat "$@"
+EOF
+# the phone as spft check sees it: the kernel release, Android's properties and the free space come from the environment
+cat > "$T/bin/uname" <<'EOF'
+#!/bin/bash
+if [ "${1:-}" = -r ] && [ "${FAKE_UNAME_R+set}" = set ]; then echo "$FAKE_UNAME_R"; exit 0; fi
+exec /usr/bin/env PATH=/usr/bin:/bin uname "$@"
+EOF
+cat > "$T/bin/getprop" <<'EOF'
+#!/bin/bash
+case ${1:-} in
+  ro.build.version.sdk) echo "${FAKE_SDK:-}" ;;
+  ro.build.version.release) echo "${FAKE_REL:-}" ;;
+  ro.product.cpu.abilist) echo "${FAKE_ABIS:-}" ;;
+  *) echo ;;
+esac
+EOF
+cat > "$T/bin/stat" <<'EOF'
+#!/bin/bash
+if [ "${1:-}" = -f ] && [ "${2:-}" = -c ]; then
+  [ -n "${FAKE_FREE_MB:-}" ] || exit 1
+  echo "$FAKE_FREE_MB 1048576"     # blocks of 1 MB: the free blocks are the free megabytes
+  exit 0
+fi
+exec /usr/bin/env PATH=/usr/bin:/bin stat "$@"
 EOF
 cat > "$T/bin/termux-x11" <<EOF
 #!/bin/bash
@@ -116,13 +141,20 @@ sed -e "s#/system/bin/#$T/sysbin/#g" \
     -e "s#/proc/mounts#$T/mounts.fake#g" \
     -e "s#/sys/bus/usb/drivers/cdc_acm#$T/no-cdc_acm#g" \
     -e "s#free_mb /data)#free_mb $T/no-such-folder)#" \
+    -e "s#/data/system/packages.list#$T/packages.list#g" \
+    -e "s#\"/data/data/\$pk\"#\"$T/appdata/\$pk\"#" \
+    -e "s#\"/data/user/0/\$pk\"#\"$T/appdata0/\$pk\"#" \
+    -e "s#\[ -d /data/data \] || \[ -d /data/user/0 \]#[ -d $T/appdata ] || [ -d $T/appdata0 ]#" \
     -e 's#^is_root() .*#is_root() { [ "${FAKE_ROOT:-0}" = 1 ]; }#' "${SPFT_UNDER_TEST:-$REPO/spft}" > "$T/spft_test.sh"
 if grep -n '/system/' "$T/spft_test.sh" | grep -v -e 'tried /system/bin' -e '/system/\*'; then echo "NOTE: unreplaced /system paths above"; fi
+if grep -n -e '/data/system' -e '/data/user/' -e '"/data/data/' -e '/data/data \]' "$T/spft_test.sh"; then echo "NOTE: unreplaced /data paths above"; fi
 
 run() { # run PATHDIR ARGS...
   local pd=$1; shift
   env -i PATH="$pd:/usr/bin:/bin" PREFIX="$T/pfx" SPFT_ROOT="$T/invisible" SPFT_DL="$T/dl" HOME="$T" TERM=xterm \
       PREF_STATE="$T/pref.state" PREF_LOG="$T/pref.log" PREF_SILENT="${PREF_SILENT:-}" PM_LIST="${PM_LIST:-}" FAKE_ACM="${FAKE_ACM:-}" \
+      FAKE_UNAME_R="${FAKE_UNAME_R-5.10.43-android12-9}" FAKE_ARM64="${FAKE_ARM64:-1}" FAKE_SDK="${FAKE_SDK:-}" FAKE_REL="${FAKE_REL:-}" \
+      FAKE_ABIS="${FAKE_ABIS:-}" FAKE_FREE_MB="${FAKE_FREE_MB:-}" SPFT_MIN_MB="${SPFT_MIN_MB:-}" \
       bash "${SCRIPT:-$T/spft_test.sh}" "$@"
 }
 lastcall() { awk '/^chroot-call$/ {buf=""} {buf = buf $0 "\n"} END {printf "%s", buf}' "$LOG" | sed -n 's/^chroot-arg://p'; }
@@ -141,6 +173,8 @@ echo "--- helpers written inside Debian:"
 ls -l "$T/root/usr/local/bin/" | sed -n '2,$p' | awk '{print $1, $NF}'
 cmp "$T/root/usr/local/bin/spft-run" "$REPO/lib/run.sh" && echo "spft-run identical to lib/run.sh"
 cmp "$T/root/usr/local/bin/spft-gui" "$REPO/lib/gui.sh" && echo "spft-gui identical to lib/gui.sh"
+cmp "$T/root/usr/local/lib/spft/kernelfix.sh" "$REPO/lib/kernelfix.sh" && echo "kernelfix.sh identical to lib/kernelfix.sh (spft-run reads it in Debian)"
+cmp "$T/root/usr/local/lib/spft/kernelfix.so.b64" "$REPO/lib/kernelfix.so.b64" && echo "kernelfix.so.b64 identical to lib/kernelfix.so.b64"
 echo "--- file-dialog shortcuts (top level of Debian, then Debian's home):"
 ls -l "$T/root/sdcard" | awk '{print "/sdcard", $(NF-1), $NF}'
 ls -l "$T/root/root/" | awk 'NR>1 {print "~/" $(NF-2), $(NF-1), $NF}'
@@ -270,19 +304,99 @@ echo; echo "=== Q. a Termux:X11 package without termux-x11-preference"
 run "$T/bin4" x11; echo "exit=$?"
 echo "tool started: $(grep -c '^chroot-call' "$LOG")"
 
-echo; echo "=== X. spft check (the Termux part, then the phone part) with the Termux:X11 app installed"
-PM_LIST=package:com.termux.x11 run "$T/bin" check; echo "exit=$?"
+echo; echo "=== X. spft check, Android 11 style: Termux:X11 is in ROOT's package list, the normal user's pm does not show it"
+printf '%s\n' 'com.android.settings 1000 0 /data/user/0/com.android.settings platform:privapp:targetSdkVersion=30 1065,3002 0 30' \
+  'com.termux.x11 10215 0 /data/user/0/com.termux.x11 default:targetSdkVersion=29 3003,9997 0 1' > "$T/packages.list"
+run "$T/bin" check; echo "exit=$?"
+echo "-- the same question the way install.sh asks it:"
+run "$T/bin" app-installed com.termux.x11; echo "app-installed: exit=$?"
+
 echo; echo "=== X1. cdc_acm: what the kernel config says when the driver folder is missing"
 for v in m y n none ''; do
   echo "-- FAKE_ACM=${v:-(option not in the config)}"
   FAKE_ACM=$v run "$T/bin" check 2>&1 | grep '^cdc_acm'
 done
-echo; echo "=== X2. ... with the app missing"
+
+echo; echo "=== X2. the app is not in root's package list: NOT installed"
+printf '%s\n' 'com.android.settings 1000 0 /data/user/0/com.android.settings platform:privapp:targetSdkVersion=30 1065,3002 0 30' > "$T/packages.list"
 run "$T/bin" check 2>&1 | grep -E 'x11-app'; echo "exit=${PIPESTATUS[0]}"
-echo; echo "=== X3. ... when the phone's package manager can't be asked"
+run "$T/bin" app-installed com.termux.x11; echo "app-installed: exit=$?"
+echo "-- a package that only STARTS with the app's name is not the app"
+printf '%s\n' 'com.termux.x11.extra 10300 0 /data/user/0/com.termux.x11.extra default 3003 0 1' > "$T/packages.list"
+run "$T/bin" app-installed com.termux.x11; echo "app-installed: exit=$?"
+echo "-- ... but if pm does list the app, it is installed: any source that says yes wins (a false NOT installed is the worse mistake)"
+PM_LIST=package:com.termux.x11 run "$T/bin" app-installed com.termux.x11; echo "app-installed: exit=$?"
+
+echo; echo "=== X3. root can read no package list: the app's data folder tells"
+rm -f "$T/packages.list"; mkdir -p "$T/appdata" "$T/appdata0"
+echo "-- the base folders exist, the app's folder does not:"
+run "$T/bin" app-installed com.termux.x11; echo "app-installed: exit=$?"
+echo "-- the app's folder exists (main user):"
+mkdir "$T/appdata0/com.termux.x11"
+run "$T/bin" app-installed com.termux.x11; echo "app-installed: exit=$?"
+rmdir "$T/appdata0/com.termux.x11"
+echo "-- the app's folder exists (the old /data/data place):"
+mkdir "$T/appdata/com.termux.x11"
+run "$T/bin" app-installed com.termux.x11; echo "app-installed: exit=$?"
+rmdir "$T/appdata/com.termux.x11"
+
+echo; echo "=== X3b. root can tell nothing (no list, no folders): pm of the normal user is the only source"
+rmdir "$T/appdata" "$T/appdata0"
+echo "-- pm lists the app:"
+PM_LIST=package:com.termux.x11 run "$T/bin" check 2>&1 | grep -E 'x11-app'
+PM_LIST=package:com.termux.x11 run "$T/bin" app-installed com.termux.x11; echo "app-installed: exit=$?"
+echo "-- pm does not list it: only 'could not tell', never a false NOT installed"
+run "$T/bin" check 2>&1 | grep -E 'x11-app'
+run "$T/bin" app-installed com.termux.x11; echo "app-installed: exit=$?"
+echo "-- pm can't be asked either:"
 mv "$T/bin/pm" "$T/pm.off"
 run "$T/bin" check 2>&1 | grep -E 'x11-app'
 mv "$T/pm.off" "$T/bin/pm"
+
+echo; echo "=== X4. root refused: the Termux part is shown, the phone part is skipped (exit 1); the app is asked of pm"
+mkdir -p "$T/bin6"
+printf '#!/bin/bash\necho "su: permission denied" >&2\nexit 1\n' > "$T/bin6/su"
+cp "$T/bin/pm" "$T/bin/termux-x11" "$T/bin6/"
+chmod +x "$T/bin6"/*
+PM_LIST=package:com.termux.x11 run "$T/bin6" check; echo "exit=$?"
+
+echo; echo "=== X5. no su at all (a phone that is not rooted)"
+mkdir -p "$T/nosu"
+ln -sf "$(type -P timeout)" "$T/nosu/timeout"
+cp "$T/bin/pm" "$T/nosu/pm"
+env -i PATH="$T/nosu" PREFIX="$T/pfx" SPFT_ROOT="$T/invisible" SPFT_DL="$T/dl" HOME="$T" TERM=xterm PM_LIST= \
+  "$(type -P bash)" "$T/spft_test.sh" check; echo "exit=$?"
+
+echo; echo "=== X6. the kernel version row (SP Flash Tool v5 wants 4.19.14 or newer, and misreads 4.19.100 to 4.19.139)"
+for v in 4.19.127-g8d3429bdb336 4.19.100 4.19.139 4.19.140 4.19.14 4.19.13 4.14.186 3.18.140-perf 5.10.43-android12-9 6.1.75 garbage; do
+  echo "-- kernel $v"
+  FAKE_UNAME_R=$v FAKE_ACM=y run "$T/bin" check 2>&1 | sed -n '/^kernel-ver/p;/^ - the kernel/p'
+done
+echo "-- the kernel version can't be read"
+FAKE_UNAME_R='' FAKE_ACM=y run "$T/bin" check 2>&1 | grep '^kernel-ver'
+
+echo; echo "=== X7. the Result block: what blocks spft, and what to keep in mind"
+echo "-- the tablet from the report: Android 11, kernel 4.19.127, no cdc_acm, plenty of space"
+FAKE_UNAME_R=4.19.127-g8d3429bdb336 FAKE_ACM=n FAKE_SDK=30 FAKE_REL=11 FAKE_ABIS=arm64-v8a,armeabi-v7a,armeabi FAKE_FREE_MB=12000 \
+  run "$T/bin" check 2>&1 | sed -n '/^== phone/,$p'
+echo "-- a phone that has everything: no 'Keep in mind' at all"
+FAKE_ACM=y FAKE_SDK=29 FAKE_REL=10 FAKE_FREE_MB=9000 run "$T/bin" check 2>&1 | sed -n '/^== Result/,$p'
+echo "-- a 32-bit kernel: spft cannot run (a blocker)"
+FAKE_ARM64=0 FAKE_ACM=y run "$T/bin" check 2>&1 | sed -n '/^== Result/,$p'
+echo "-- 900 MB free, below the 1500 that the install insists on (a blocker)"
+FAKE_ACM=y FAKE_FREE_MB=900 run "$T/bin" check 2>&1 | sed -n '/^free/p;/^== Result/,$p'
+echo "-- 2500 MB free: it can run, but it is tight"
+FAKE_ACM=y FAKE_FREE_MB=2500 run "$T/bin" check 2>&1 | sed -n '/^== Result/,$p'
+echo "-- no chroot command (a blocker)"
+mv "$T/sysbin/chroot" "$T/chroot.off"
+FAKE_ACM=y run "$T/bin" check 2>&1 | sed -n '/^chroot/p;/^== Result/,$p'
+mv "$T/chroot.off" "$T/sysbin/chroot"
+echo "-- Android 13: the hint to the README section on killed background processes"
+FAKE_ACM=y FAKE_SDK=33 FAKE_REL=13 run "$T/bin" check 2>&1 | sed -n '/^== Result/,$p'
+echo "-- an old kernel, no driver, 32-bit: everything at once"
+FAKE_UNAME_R=3.18.71 FAKE_ARM64=0 FAKE_ACM=n FAKE_FREE_MB=1000 FAKE_SDK=31 run "$T/bin" check 2>&1 | sed -n '/^== Result/,$p'
+echo "-- the check is only a read: it changed nothing in Debian"
+if [ -e "$T/root/.spft-provisioned" ]; then echo "FAIL: check wrote a marker"; else echo "ok: no marker written"; fi
 
 echo; echo "=== U. spft update: git pull, then the install step runs again (here the pkg stand-in stops it)"
 git init -q --bare -b main "$T/origin.git"

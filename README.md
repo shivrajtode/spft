@@ -32,10 +32,11 @@ It is not made for one device. Any rooted phone or tablet that meets the [requir
 6. [Flash firmware without errors](#6-flash-firmware-without-errors)
 7. [If something goes wrong](#7-if-something-goes-wrong)
 
-Also: [If the download fails](#if-the-download-fails) - [Android 12 and newer](#android-12-and-newer) - [All commands](#all-commands) - [Update and uninstall](#update-and-uninstall) - [Good to know](#good-to-know)
+Also: [Check a phone first (no install)](#check-a-phone-first-no-install) - [If the download fails](#if-the-download-fails) - [Android 12 and newer](#android-12-and-newer) - [All commands](#all-commands) - [Update and uninstall](#update-and-uninstall) - [Good to know](#good-to-know)
 
 ## Quick start
 
+0. *Not sure that your phone can be the host?* [Check it first](#check-a-phone-first-no-install). It installs nothing.
 1. Install the apps in [section 2](#2-install-the-apps) (Termux, Termux:X11, and optionally Termux:API).
 2. Open **Termux**, copy this whole line, paste it and press Enter:
 
@@ -53,6 +54,46 @@ Also: [If the download fails](#if-the-download-fails) - [Android 12 and newer](#
 
 > **Why two commands and not only `git clone`?** `git clone` only copies files. Git never runs a program from a repository (that would be unsafe), so the install is one more command, `install.sh`. The line above does both for you.
 
+## Check a phone first (no install)
+
+Is this phone or tablet able to be the host? Find out **without installing anything**. This command downloads the few files it needs (a few hundred KB) into a temporary folder, runs the check, and deletes them again. You only need Termux and a root app that allows it. In Termux paste:
+
+```
+bash <(curl -fsSL https://raw.githubusercontent.com/shivrajtode/spft/main/check.sh)
+```
+
+(If it says `curl: command not found`, run `pkg install curl` first.) Your root app may ask: press **Allow** for Termux.
+
+The check ends with a short **Result**: what stops spft on this device (a 32-bit kernel, too little space, ...) and what to keep in mind (for example: no `cdc_acm` driver, so the tool starts but cannot see a device). Example, from a tablet with Android 11:
+
+```
+== Termux ==
+(your root app may ask now: press ALLOW for Termux)
+root      : su found, and root works
+x11-pkg   : installed
+x11-app   : Termux:X11 app installed
+storage   : run termux-setup-storage once if you want Termux to see your Download folder (optional)
+== phone and Debian ==
+kernel    : 64-bit ARM (CONFIG_ARM64=y) - OK, a 32-bit Android userspace doesn't matter
+kernel-ver: 4.19.127-g8d3429bdb336 - SP Flash Tool v5 may refuse this kernel by mistake (it seems to compare versions as text). spft works around that by itself when it starts the tool
+cdc_acm   : MISSING - this kernel was built without it (CONFIG_USB_ACM), so SP Flash Tool can't see a device from this phone (use mtkclient instead)
+chroot    : /system/bin/chroot
+android   : 11 (API 30), ABIs: arm64-v8a,armeabi-v7a,armeabi
+free      : 27360 MB on /data (the install needs about 3000)
+debian    : not installed yet (spft install does that)
+box64     : not installed yet (spft install does that)
+tool      : not installed yet (spft install gets it, or: spft tool)
+
+== Result ==
+spft can be installed and started on this device.
+Keep in mind:
+ - this kernel has no cdc_acm driver (CONFIG_USB_ACM), so SP Flash Tool can't talk to a device from this phone. spft still installs and starts here, which is enough to try it out; to flash, use a phone whose kernel has the driver (or mtkclient)
+```
+
+That tablet can try out spft, but it cannot flash: it has no USB serial driver. A phone whose Result has no `Keep in mind` lines about `cdc_acm` is a good host. If the check says `spft can NOT run on this device`, the lines under it say why.
+
+The same check is `spft check`, once spft is installed. If you got the files with `git clone`, `bash check.sh` in that folder does it too, without downloading anything. To check another copy of the project (a fork, a test branch): `SPFT_REPO=owner/name SPFT_BRANCH=main bash <(curl -fsSL https://raw.githubusercontent.com/owner/name/main/check.sh)`.
+
 ## 1. What you need
 
 **The host: the phone or tablet that runs spft**
@@ -62,6 +103,7 @@ Also: [If the download fails](#if-the-download-fails) - [Android 12 and newer](#
 | Root | Magisk, KernelSU, APatch or similar. The root app must allow Termux. With KernelSU or APatch there may be no pop-up: open the app, go to *Superuser* and switch **Termux** on before you install. |
 | Android 8.0 or newer | Termux:X11 needs it. |
 | A 64-bit **kernel** | The kernel, not Android itself. A phone with 32-bit Android can still have a 64-bit kernel (the Galaxy J7 Max does). `spft check` tells you. Without it the emulator (box64) cannot run. |
+| Kernel 4.19.14 or newer | SP Flash Tool v5 asks for it ("Invalid linux kernel version"). A kernel in the range 4.19.100 to 4.19.139 is turned away by mistake, and spft fixes that for you. An older kernel may be turned away too: try first, and if the message comes, see the [details](docs/TROUBLESHOOTING.md#the-invalid-linux-kernel-version-message). |
 | USB host (OTG) | The phone must be able to act as a USB host. You need an **OTG adapter** and a **data** USB cable (a charge-only cable does not work). |
 | The `cdc_acm` USB driver in the kernel | SP Flash Tool talks to the device through it. `spft check` tells you. |
 | About 3 GB free | On the phone's internal storage. |
@@ -88,6 +130,7 @@ Rules that avoid problems:
 - **Termux and Termux:API must come from the same place**, both from F-Droid or both from GitHub. They are signed with different keys. If you switch, uninstall all of them first.
 - GitHub has many Termux files. Pick the one with `apt-android-7` in its name and your CPU type: `arm64-v8a` for most phones, `armeabi-v7a` for a 32-bit phone. The `universal` file works on both.
 - Termux:X11 is installed **twice**: this is the app (above) and the package `termux-x11-nightly`. The installer ([section 3](#3-install-spft-one-time)) installs the package for you. You only install the app yourself.
+- **It does not matter where your Termux:X11 app comes from.** spft only checks that the app is installed, not which build it is. If you already have it (from F-Droid, say), keep it. Only if the screen stays black or the app and the package do not work together, try the nightly APK from the table.
 - Open each app once after installing it.
 
 ## 3. Install spft (one time)
@@ -105,6 +148,23 @@ Rules that avoid problems:
    - `2/4` checks that the Termux:X11 app is installed
    - `3/4` adds the `spft` command
    - `4/4` Debian, box64 and SP Flash Tool (this is the long one)
+
+   **Step `4/4` is long, and it shows its progress.** It has four parts of its own, marked `[1/4]` to `[4/4]`: *base packages*, *arm64 + x86_64 libraries*, *box64* and a *self-test*. Part `[2/4]` is the longest (about 90 packages, several minutes on a slow tablet). Whatever takes time prints something:
+
+   ```
+   >> [2/4] arm64 + x86_64 libraries
+      checking what has to be installed (one quick check) ...
+      77 packages to install
+      downloading 77 files, 38.2 MB. apt names each file below, and a progress line follows every 5 seconds.
+   Get:1 http://deb.debian.org/debian trixie/main arm64 libx11-6 ...
+      downloaded 14.2 of 38.2 MB (37%) - 24 of 77 files
+      ...
+      installing 77 packages: unpacking, then setting them up. No more downloading; the phone is busy, it is not stuck.
+      [12/77] Unpacking libxcb1:arm64 ...
+      ... unpacking and setting up the packages: still working (1m20s)
+   ```
+
+   So the screen keeps moving: a counter for every download (MB, percent, files), a counter `[12/77]` while packages are unpacked, and a `... still working (1m20s)` line every 20 seconds when there is nothing else to say. **A quiet screen is not a hang.** If really nothing new appears for 10 minutes, press Ctrl+C and run `bash ~/spft/install.sh` again: it carries on, and what was already downloaded is kept. If it stops with an error it says in which step (`The setup stopped in step: ...`).
 5. At the end you see `done. Start SP Flash Tool with:  spft`.
 6. Check everything with:
 
@@ -112,24 +172,7 @@ Rules that avoid problems:
    spft check
    ```
 
-   No line may say `NOT`, `MISSING` or `missing`. (The `storage` line is optional: it only matters if you want to use `termux-setup-storage`.) Example, from a phone with 32-bit Android on a 64-bit kernel:
-
-   ```
-   == Termux ==
-   root     : su found
-   x11-pkg  : installed
-   x11-app  : Termux:X11 app installed
-   storage  : run termux-setup-storage once if you want Termux to see your Download folder (optional)
-   == phone and Debian ==
-   kernel   : 64-bit ARM (CONFIG_ARM64=y) - OK, a 32-bit Android userspace doesn't matter
-   cdc_acm  : present - OK (the USB serial driver SP Flash Tool talks through)
-   chroot   : /system/bin/chroot
-   android  : 8.1.0 (API 27), ABIs: armeabi-v7a,armeabi
-   free     : 21043 MB on /data (the install needs about 3000)
-   debian   : installed in /data/local/spft-debian
-   box64    : installed
-   tool     : /opt/SP_Flash_Tool_v5.2228_Linux/flash_tool
-   ```
+   It prints the same kind of list as the [check without install](#check-a-phone-first-no-install), now with `debian : installed`, `box64 : installed` and `tool : /opt/SP_Flash_Tool_v5.2228_Linux/flash_tool`. The last block, **Result**, says in plain words whether spft can run on this device and what to keep in mind. A line that says `NOT` or `MISSING` is explained there or in [section 7](#7-if-something-goes-wrong). (The `storage` line is optional: it only matters if you want to use `termux-setup-storage`.)
 
 Running `bash ~/spft/install.sh` again is always safe. It only does what is still missing, so it also **continues an install that stopped**. If the SP Flash Tool download fails, see [If the download fails](#if-the-download-fails).
 
@@ -274,6 +317,11 @@ Common problems with spft itself:
 | `only N MB are free` / `No space left on device` | Free some space (about 3 GB needed) and run `bash ~/spft/install.sh` again. |
 | `pkg could not install ...` | Run `termux-change-repo`, pick another mirror, and run the install again. |
 | `the Termux:X11 server did not start` | Install the **Termux:X11 app** (not only the package, [section 2](#2-install-the-apps)) and open it once. |
+| `x11-app : NOT installed`, but the app is installed | An older spft could not see other apps on Android 11 and newer (Android hides them from Termux) and said so by mistake. Run `spft update`: spft now asks root, which sees every app. It does not matter whether the app is from F-Droid or from GitHub. |
+| The install seems stuck at `arm64 + x86_64 libraries` | It is the longest part and it is working: look for the counters and the `still working` lines ([section 3](#3-install-spft-one-time)). If nothing new appears for 10 minutes, press Ctrl+C and run `bash ~/spft/install.sh` again. |
+| The tool says `Invalid linux kervel version. Please upgrade linux kernel up to at least 4.19.14!` | The tool misspells *kernel*. On kernels 4.19.100 to 4.19.139 it says this by mistake, and spft handles it itself when it starts the tool (run `spft update` for the newest version). On a kernel older than 4.19.14 it may say this too: see [the details](docs/TROUBLESHOOTING.md#the-invalid-linux-kernel-version-message). |
+| A **red** `[BOX64] Error: ... is not an executable file` during the install | A bug in older versions of spft: its self-test picked a text file instead of the test program. Run `spft update` and `spft install`. |
+| Lines like `Cannot dlopen` or `Error loading needed lib` when the tool starts | Normal: box64 mentions libraries it could not load and goes on. Only a red `[BOX64]` in front of `Error:` is a real problem. |
 | Black screen in Termux:X11 | Run `spft stop` (it also stops the Termux:X11 server and removes a socket file that an old server left behind), close Termux:X11 from Recents, then run `spft` again. |
 | `SP Flash Tool is already running` | The tool is open in the background. Switch to Termux:X11, or run `spft stop`. |
 | `box64 self-test FAILED` | Run `spft install` again. If it fails again, this phone cannot run the emulator. |
@@ -350,6 +398,8 @@ Also set *Settings > Apps > Termux > Battery* (and the same for Termux:X11) to *
 | `spft uninstall` | Delete the Debian system and the downloads. Asks first, and refuses while anything is still mounted. |
 | `spft help` | Show this list |
 
+Without installing spft you can still run the check: [Check a phone first](#check-a-phone-first-no-install).
+
 ## Update and uninstall
 
 **Update:** `spft update` gets the newest version of spft and applies it.
@@ -379,6 +429,7 @@ If it says `NOT deleting`, something is still mounted inside the Debian folder. 
 - Problems and ideas: open an issue at <https://github.com/shivrajtode/spft/issues> and paste the output of `spft check`.
 
 Made by **Shivraj**: Telegram [@Shivraj_editx](https://t.me/Shivraj_editx), GitHub [shivrajtode](https://github.com/shivrajtode).
+And Special thanx💖 to my friend **Kaif** Telegram [@mkr_infinity](https://t.me/mkr_infinity) for recommending spflashtool linux version and giving some guide about it.
 
 Thanks to: [Termux](https://termux.dev/en/), [Termux:X11](https://github.com/termux/termux-x11), [box64](https://github.com/ptitSeb/box64), [Debian](https://www.debian.org), [mtkclient](https://github.com/bkerler/mtkclient), and the [Hovatek forum](https://www.hovatek.com/forum/post-228.html) for its SP Flash Tool guide and [error code list](https://www.hovatek.com/forum/post-93019.html).
 

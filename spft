@@ -35,7 +35,7 @@ LIB=$SPFT_HOME/lib
 
 die() { echo "spft: $*" >&2; exit 1; }
 say() { printf '\n>> %s\n' "$*"; }
-row() { printf '%-9s: %s\n' "$1" "$2"; }
+row() { printf '%-10s: %s\n' "$1" "$2"; }
 is_root() { [ "$EUID" -eq 0 ]; }
 
 usage() {
@@ -144,13 +144,38 @@ wake_unlock() { if command -v termux-wake-unlock >/dev/null 2>&1; then termux-wa
 
 # Android system properties and apps, as the normal Termux user
 prop() { local g; g=$(command -v getprop 2>/dev/null || echo /system/bin/getprop); "$g" "$1" 2>/dev/null || true; }
-app_installed() { # app_installed PACKAGE -> 0 installed, 1 not installed, 2 can't tell
-  local pm all
+
+# root_app_installed PACKAGE   0 installed, 1 not installed, 2 can't tell. Run as root: root sees every app, a normal Termux
+# user does not. Since Android 11 an app is only shown the apps it has declared interest in, so `pm list packages` run
+# from Termux leaves out, among others, Termux:X11. (spft once reported an installed Termux:X11 as missing for that reason.)
+root_app_installed() {
+  local pk=$1 name
+  if [ -r /data/system/packages.list ]; then
+    while read -r name _; do
+      if [ "$name" = "$pk" ]; then return 0; fi
+    done < /data/system/packages.list
+    return 1
+  fi
+  if [ -d "/data/data/$pk" ] || [ -d "/data/user/0/$pk" ]; then return 0; fi
+  if [ -d /data/data ] || [ -d /data/user/0 ]; then return 1; fi
+  return 2
+}
+
+# app_installed PACKAGE   0 installed, 1 not installed, 2 can't tell. Root is asked first (it sees every app); `pm` is
+# asked too, as a normal user, because any source that says "installed" is right (a false "NOT installed" is the worse
+# mistake). Without root the answer can only be "installed" (when `pm` lists the app) or "can't tell": a normal user is
+# not shown all apps.
+app_installed() {
+  local pm all ans=
+  if command -v su >/dev/null 2>&1; then
+    ans=$(root_call root-app-installed "$1" 2>/dev/null | tail -n 1) || ans=
+    if [ "$ans" = yes ]; then return 0; fi
+  fi
   pm=$(command -v pm 2>/dev/null || echo /system/bin/pm)
   all=$(timeout 25 "$pm" list packages 2>/dev/null || true)
-  [ -n "$all" ] || return 2
   case $all in *"package:$1"$'\n'* | *"package:$1") return 0 ;; esac
-  return 1
+  if [ "$ans" = no ]; then return 1; fi
+  return 2
 }
 
 is_mounted() { grep -qF " $1 " /proc/mounts; }
@@ -187,6 +212,9 @@ write_helpers() {
   cp -f "$LIB/gui.sh" "$R/usr/local/bin/spft-gui"
   cp -f "$LIB/run.sh" "$R/usr/local/bin/spft-run"
   chmod 755 "$R/usr/local/bin/spft-gui" "$R/usr/local/bin/spft-run"
+  # the kernel-version fix (lib/kernelfix.sh explains it); spft-run reads these
+  mkdir -p "$R/usr/local/lib/spft"
+  cp -f "$LIB/kernelfix.sh" "$LIB/kernelfix.so.b64" "$R/usr/local/lib/spft/"
 }
 
 root_enter() { # root_enter [command...]   mount, then open a shell (or run the command) inside the chroot
@@ -512,58 +540,106 @@ cmd_tool() { # cmd_tool [list|--if-missing|FILE.zip|URL|NAME]
 
 root_check() {
   unset LD_LIBRARY_PATH LD_PRELOAD
-  local free sdk rel abis where
+  local free sdk rel abis where krel need blockers='' limits=''
+  # blocker  = spft cannot run on this device at all;  limit = it runs, but something will not work
+  blocker() { blockers="$blockers - $1"$'\n'; }
+  limit() { limits="$limits - $1"$'\n'; }
   case "$(kernel_arch)" in
     64) row kernel "64-bit ARM (CONFIG_ARM64=y) - OK, a 32-bit Android userspace doesn't matter" ;;
-    32) row kernel "NOT a 64-bit ARM kernel - box64 needs one (use another host phone, or mtkclient)" ;;
+    32) row kernel "NOT a 64-bit ARM kernel - box64 needs one (use another host phone, or mtkclient)"
+        blocker "the kernel is not 64-bit ARM, and box64 (the emulator) needs that" ;;
     *) row kernel "unknown (no /proc/config.gz) - 'spft install' will test it" ;;
+  esac
+  # the kernel VERSION: SP Flash Tool v5 asks for 4.19.14 or newer, and wrongly refuses 4.19.100 - 4.19.139 (lib/kernelfix.sh)
+  # shellcheck source=lib/kernelfix.sh
+  . "$LIB/kernelfix.sh"
+  krel=$(uname -r 2>/dev/null || true)
+  case "$(kernelfix_class "$krel")" in
+    fine) row kernel-ver "$krel - OK for SP Flash Tool v5 (it asks for 4.19.14 or newer)" ;;
+    text) row kernel-ver "$krel - SP Flash Tool v5 may refuse this kernel by mistake (it seems to compare versions as text). spft works around that by itself when it starts the tool" ;;
+    old) row kernel-ver "$krel - older than the 4.19.14 that SP Flash Tool v5 asks for. The tool may refuse it, so try spft first. If it says \"Invalid linux kernel version\": SPFT_FAKE_KERNEL=5.4.0 spft (at your own risk)"
+         limit "the kernel ($krel) is older than the 4.19.14 that SP Flash Tool v5 asks for, so the tool may stop with \"Invalid linux kernel version\" (try it first; if it does, SPFT_FAKE_KERNEL=5.4.0 spft shows it another version - your own risk; mtkclient has no such limit)" ;;
+    *) row kernel-ver "${krel:-unknown} (could not read the version)" ;;
   esac
   if [ -d /sys/bus/usb/drivers/cdc_acm ]; then
     row cdc_acm "present - OK (the USB serial driver SP Flash Tool talks through)"
   else
     case "$(acm_config)" in
-      m) row cdc_acm "NOT LOADED - this kernel has the driver as a module. Try:  su -c 'modprobe cdc_acm'  and run spft check again" ;;
-      n) row cdc_acm "MISSING - this kernel was built without it (CONFIG_USB_ACM), so SP Flash Tool can't see a device from this phone (use mtkclient instead)" ;;
+      m) row cdc_acm "NOT LOADED - this kernel has the driver as a module. Try:  su -c 'modprobe cdc_acm'  and run spft check again"
+         limit "cdc_acm is not loaded: SP Flash Tool can't see a device from this phone until it is (su -c 'modprobe cdc_acm')" ;;
+      n) row cdc_acm "MISSING - this kernel was built without it (CONFIG_USB_ACM), so SP Flash Tool can't see a device from this phone (use mtkclient instead)"
+         limit "this kernel has no cdc_acm driver (CONFIG_USB_ACM), so SP Flash Tool can't talk to a device from this phone. spft still installs and starts here, which is enough to try it out; to flash, use a phone whose kernel has the driver (or mtkclient)" ;;
       y) row cdc_acm "not found, although the kernel config says it is built in. If the target is never detected, use another host phone (or mtkclient)" ;;
       *) row cdc_acm "not found, and the kernel config can't be read to tell why. If the target is never detected, use another host phone (or mtkclient)" ;;
     esac
   fi
-  if find_chroot; then row chroot "$CHROOT"; else row chroot "NOT FOUND"; fi
+  if find_chroot; then row chroot "$CHROOT"; else row chroot "NOT FOUND"; blocker "there is no chroot command (tried /system/bin, /system/xbin and Termux)"; fi
   sdk=$(getprop ro.build.version.sdk 2>/dev/null || true)
   rel=$(getprop ro.build.version.release 2>/dev/null || true)
   abis=$(getprop ro.product.cpu.abilist 2>/dev/null || true)
   row android "${rel:-unknown} (API ${sdk:-?}), ABIs: ${abis:-?}"
   free=$(free_mb /data)
-  if [ -n "$free" ]; then row free "$free MB on /data (the install needs about 3000)"; fi
-  if [ -x "$R/bin/bash" ]; then row debian "installed in $R"; else row debian "NOT installed - run: spft install"; fi
-  if [ -x "$R/usr/local/bin/box64" ] || [ -x "$R/usr/bin/box64" ]; then row box64 "installed"; else row box64 "missing - run: spft install"; fi
-  if where=$(root_tool_where); then row tool "${where#"$R"}"; else row tool "NOT installed - run: spft tool"; fi
+  if [ -n "$free" ]; then
+    row free "$free MB on /data (the install needs about 3000)"
+    need=${SPFT_MIN_MB:-1500}
+    if [ "$free" -lt "$need" ]; then
+      blocker "only $free MB are free on /data, and the install needs about 3000 (it refuses below $need)"
+    elif [ "$free" -lt 3000 ]; then
+      limit "$free MB are free on /data: tight, the install needs about 3000"
+    fi
+  fi
+  if [ -x "$R/bin/bash" ]; then row debian "installed in $R"; else row debian "not installed yet (spft install does that)"; fi
+  if [ -x "$R/usr/local/bin/box64" ] || [ -x "$R/usr/bin/box64" ]; then row box64 "installed"; else row box64 "not installed yet (spft install does that)"; fi
+  if where=$(root_tool_where); then row tool "${where#"$R"}"; else row tool "not installed yet (spft install gets it, or: spft tool)"; fi
   case $sdk in
     '' | *[!0-9]*) ;;
     *) if [ "$sdk" -ge 31 ]; then
-      echo
-      echo "Android 12 or newer: Android may kill background processes. If SP Flash Tool or Termux closes by"
-      echo "itself, see the README, section \"Android 12 and newer\"."
+      limit "Android 12 or newer: Android may kill background processes. If SP Flash Tool or Termux closes by itself, see the README, section \"Android 12 and newer\"."
     fi ;;
   esac
+  echo
+  echo "== Result =="
+  if [ -n "$blockers" ]; then
+    echo "spft can NOT run on this device, because:"
+    printf '%s' "$blockers"
+  else
+    echo "spft can be installed and started on this device."
+  fi
+  if [ -n "$limits" ]; then
+    echo "Keep in mind:"
+    printf '%s' "$limits"
+  fi
 }
+
+# The Termux:X11 app. spft does not mind where it came from (the nightly APK from GitHub, F-Droid, ...): it only needs it installed.
+X11_APP_LINK=https://github.com/termux/termux-x11/releases/tag/nightly
 
 cmd_check() {
   if is_root; then root_check; return 0; fi
   echo "== Termux =="
-  local rc
-  if command -v su >/dev/null 2>&1; then row root "su found"; else row root "NOT FOUND - this needs a rooted phone (Magisk, KernelSU, ...)"; fi
+  local rc have_root=0
+  if command -v su >/dev/null 2>&1; then
+    echo "(your root app may ask now: press ALLOW for Termux)"
+    if root_ok; then
+      row root "su found, and root works"
+      have_root=1
+    else
+      row root "su found, but root was REFUSED - open your root app and allow Termux (KernelSU, APatch: switch Termux on in the Superuser list), then run this again"
+    fi
+  else
+    row root "NOT FOUND - this needs a rooted phone (Magisk, KernelSU, ...)"
+  fi
   if command -v termux-x11 >/dev/null 2>&1; then row x11-pkg "installed"; else row x11-pkg "MISSING - run: pkg install x11-repo && pkg install termux-x11-nightly"; fi
   rc=0
   app_installed com.termux.x11 || rc=$?
   case $rc in
     0) row x11-app "Termux:X11 app installed" ;;
-    1) row x11-app "NOT installed - get termux-x11-universal-debug.apk: https://github.com/termux/termux-x11/releases/tag/nightly" ;;
-    *) row x11-app "could not tell (open the Termux:X11 app once to check)" ;;
+    1) row x11-app "NOT installed - get the Termux:X11 app, for example the nightly APK termux-x11-universal-debug.apk from $X11_APP_LINK" ;;
+    *) row x11-app "could not tell if the Termux:X11 app is installed (Android hides other apps from Termux). If it is not, get it from $X11_APP_LINK" ;;
   esac
   if [ -d "$HOME/storage/downloads" ]; then row storage "Termux can read your Download folder"; else row storage "run termux-setup-storage once if you want Termux to see your Download folder (optional)"; fi
   echo "== phone and Debian =="
-  command -v su >/dev/null 2>&1 || return 1
+  if [ "$have_root" = 0 ]; then echo "(skipped: this part needs root)"; return 1; fi
   as_root check
 }
 
@@ -649,6 +725,8 @@ cmd_install() { # cmd_install [--no-tool]
   [ "$(wc -c < "$DL/rootfs.tar.gz")" -gt 10000000 ] ||
     die "$DL/rootfs.tar.gz is too small to be a rootfs - delete it, or set SPFT_URL to a Debian arm64 rootfs tarball"
   say "setting up Debian: box64, libraries, desktop (15-30 minutes the first time)"
+  echo "   Four steps follow. Downloads show a counter (MB and files), and a line appears every 20 seconds while a step is busy."
+  echo "   The longest is '[2/4] arm64 + x86_64 libraries'. It is working, not stuck, even when it takes minutes."
   local rc=0
   root_call root-install "$DL/rootfs.tar.gz" || rc=$?
   case $rc in
@@ -818,7 +896,7 @@ cmd_x11() { # cmd_x11 [options]: Termux:X11 server and app as the normal Termux 
   need_su
   command -v termux-x11 >/dev/null 2>&1 ||
     die "termux-x11 is not installed. In Termux run:  pkg install x11-repo  and then  pkg install termux-x11-nightly
-     (and install the Termux:X11 app: the file termux-x11-universal-debug.apk from
+     (and, if you do not have it yet, the Termux:X11 app: the file termux-x11-universal-debug.apk from
       https://github.com/termux/termux-x11/releases/tag/nightly - or run: bash install.sh)"
   if [ "$action" = reset ]; then
     x11_open
@@ -928,7 +1006,9 @@ case "${1:-}" in
   umount) is_root || as_root umount; root_umount ;;
   uninstall) shift; cmd_uninstall "$@" ;;
   help | -h | --help) usage ;;
+  app-installed) rc=0; app_installed "${2:?package name missing}" || rc=$?; exit "$rc" ;;
   root-check) root_check ;;
+  root-app-installed) rc=0; root_app_installed "${2:?package name missing}" || rc=$?; case $rc in 0) echo yes ;; 1) echo no ;; *) echo unknown ;; esac ;;
   root-uninstall) root_uninstall ;;
   root-install) root_install "${2:?tarball path missing}" ;;
   root-tool) root_tool "${2:?zip path missing}" ;;

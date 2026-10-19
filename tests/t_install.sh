@@ -142,12 +142,17 @@ make_repo() { # make_repo FOLDER
   sed -e "s#/system/bin/#$T/sysbin/#g" \
       -e "s#/system/xbin/chroot#$T/none/chroot#g" \
       -e "s#/data/media/0#$T/media#g" \
+      -e "s#/data/system/packages.list#$T/packages.list#g" \
+      -e "s#\"/data/data/\$pk\"#\"$T/appdata/\$pk\"#" \
+      -e "s#\"/data/user/0/\$pk\"#\"$T/appdata0/\$pk\"#" \
+      -e "s#\[ -d /data/data \] || \[ -d /data/user/0 \]#[ -d $T/appdata ] || [ -d $T/appdata0 ]#" \
       -e 's#^is_root() .*#is_root() { [ "${FAKE_ROOT:-0}" = 1 ]; }#' "$REPO/spft" > "$1/spft"
   sed -e 's#^\[ "$(id -u)" != 0 \] || die.*#true#' "$REPO/install.sh" > "$1/install.sh"
 }
 make_repo "$T/repo"
 if grep -n '(id -u)' "$T/repo/install.sh"; then echo "NOTE: install.sh still checks id -u (the sed did not match)"; fi
 if grep -n '/system/' "$T/repo/spft" | grep -v -e 'tried /system/bin' -e '/system/\*'; then echo "NOTE: unreplaced /system paths above"; fi
+if grep -n -e '/data/system' -e '/data/user/' -e '"/data/data/' -e '/data/data \]' "$T/repo/spft"; then echo "NOTE: unreplaced /data paths above"; fi
 
 run() { # run [VAR=value ...] COMMAND...   with the stand-in environment
   env -i PATH="$T/pfx/bin:$T/bin:/usr/bin:/bin" PREFIX="$T/pfx" SPFT_ROOT="$T/root" SPFT_DL="$T/dl" HOME="$T/home" TERM=xterm \
@@ -158,16 +163,28 @@ count() { grep -c "$1" "$LOG"; }
 provisions() { count '/root/spft-provision.sh$'; }
 sed_t() { sed "s#$T#\$T#g"; }
 INSTALL() { bash "$T/repo/install.sh" "$@"; }   # used as: run [ENV...] bash "$T/repo/install.sh" ...
+# what root sees of the installed apps (/data/system/packages.list), written the way Android writes it. `pm` as the normal
+# Termux user does NOT show them (Android 11 and newer hide other apps), so PM_LIST stays empty in these tests.
+apps() { # apps NAME...   (no name: a phone that has only the system apps)
+  mkdir -p "$T/appdata" "$T/appdata0"
+  printf '%s\n' 'com.android.settings 1000 0 /data/user/0/com.android.settings platform:privapp:targetSdkVersion=30 1065,3002 0 30' > "$T/packages.list"
+  local n
+  for n in "$@"; do printf '%s 10215 0 /data/user/0/%s default:targetSdkVersion=29 3003,9997 0 1\n' "$n" "$n" >> "$T/packages.list"; done
+}
+no_list() { rm -f "$T/packages.list"; rm -rf "$T/appdata" "$T/appdata0"; }   # root can tell nothing about the apps
 
 echo "=== 1. first install: the Termux:X11 app is not installed yet"
-fresh
+fresh; apps
 PM_LIST='' run bash "$T/repo/install.sh" > "$T/out" 2>&1; rc=$?
 sed_t < "$T/out"; echo "exit=$rc"
 [ "$rc" = 0 ] && ok "install finished with exit 0" || bad "install exit status $rc"
 has "$T/out" 'root: if your root app asks, press ALLOW' "asks for root right at the start"
-has "$T/out" 'Termux:X11 app: NOT INSTALLED yet' "says the Termux:X11 app is missing"
+has "$T/out" 'Termux:X11 app: not found' "says the Termux:X11 app is missing"
 has "$T/out" 'github.com/termux/termux-x11/releases/tag/nightly' "gives the link to the Termux:X11 app"
 has "$T/out" 'Reminder: install the Termux:X11 app' "reminds again at the end"
+hasnt "$T/out" 'must come from GitHub' "does not insist on one particular source for the app"
+has "$T/out" 'Four steps follow' "says what the long step will show"
+has "$T/out" "working, not stuck" "says that the longest step is working, not stuck"
 has "$T/out" 'done. Start SP Flash Tool with:  spft' "ends by telling you to type spft"
 echo "--- Termux packages asked for:"; grep '^pkg ' "$LOG"
 has "$LOG" '^pkg install -y git curl wget tar unzip xz-utils coreutils x11-repo$' "installs git, curl, ... and the x11 repository"
@@ -193,9 +210,9 @@ echo; echo "=== 2. the spft command works from any folder, and keeps arguments w
 (cd / && run "$T/pfx/bin/spft" x11 'bad option' 2>&1) | grep -q "unknown option 'bad option'" && ok "an argument with a space arrives in one piece" || bad "argument was split"
 (cd / && run "$T/pfx/bin/spft" tool list) | grep -q 'v5.2228' && ok "spft tool list works through the launcher" || bad "tool list through the launcher"
 
-echo; echo "=== 3. running install.sh again changes nothing and downloads nothing"
-: > "$LOG"
-PM_LIST=package:com.termux.x11 run bash "$T/repo/install.sh" > "$T/out" 2>&1; rc=$?
+echo; echo "=== 3. running install.sh again changes nothing and downloads nothing (the Termux:X11 app is installed: root sees it, pm does not)"
+: > "$LOG"; apps com.termux.x11
+PM_LIST='' run bash "$T/repo/install.sh" > "$T/out" 2>&1; rc=$?
 grep -E 'Termux:X11 app|already|done' "$T/out"; echo "exit=$rc"
 [ "$rc" = 0 ] && ok "exit 0" || bad "exit status $rc"
 has "$T/out" 'Termux:X11 app: installed' "sees that the Termux:X11 app is installed"
@@ -204,6 +221,20 @@ has "$T/out" 'rootfs already unpacked' "does not unpack the rootfs again"
 has "$T/out" 'Debian is already set up' "does not set Debian up again"
 has "$T/out" 'SP Flash Tool is already installed' "does not download the tool again"
 [ "$(count '^wget ')" = 0 ] && [ "$(count '^curl ')" = 0 ] && [ "$(provisions)" = 0 ] && ok "no downloads, no provisioning" || bad "wget=$(count '^wget ') curl=$(count '^curl ') provisioning=$(provisions)"
+
+echo; echo "=== 3b. root can tell nothing about the apps: only 'could not tell', never 'not found'"
+no_list
+: > "$LOG"
+PM_LIST='' run bash "$T/repo/install.sh" > "$T/out" 2>&1; rc=$?
+grep 'Termux:X11 app' "$T/out"
+has "$T/out" 'Termux:X11 app: could not tell' "says that it can't tell"
+hasnt "$T/out" 'Termux:X11 app: not found' "does not say that the app is missing"
+hasnt "$T/out" 'Reminder: install the Termux:X11 app' "no reminder (nobody knows that it is missing)"
+has "$T/out" 'github.com/termux/termux-x11/releases/tag/nightly' "still gives the link, in case it is missing"
+echo "-- ... and when pm shows the app, that settles it"
+PM_LIST=package:com.termux.x11 run bash "$T/repo/install.sh" > "$T/out" 2>&1
+has "$T/out" 'Termux:X11 app: installed' "pm's answer is used"
+apps com.termux.x11
 
 echo; echo "=== 4. a changed lib/provision.sh (after \`spft update\`) is applied once"
 echo '# a new line' >> "$T/repo/lib/provision.sh"

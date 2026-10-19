@@ -97,6 +97,12 @@ for title in ("Android 12 and newer", "If the download fails"):
     else:
         bad('the README section "%s" that spft mentions is missing (or spft no longer mentions it)' % title)
 
+# the tool's start script points to the troubleshooting page for the kernel-version message
+if "docs/TROUBLESHOOTING.md" in read("lib/run.sh") and slug('The "Invalid linux kernel version" message') in anchor_cache["docs/TROUBLESHOOTING.md"]:
+    ok("lib/run.sh points to docs/TROUBLESHOOTING.md and its section on the kernel-version message exists")
+else:
+    bad("the kernel-version section of docs/TROUBLESHOOTING.md is missing, or lib/run.sh no longer points to it")
+
 # every command in `spft help` is in the README's command table
 usage = re.search(r"usage\(\) \{\n  cat <<'EOF'\n(.*?)\nEOF", spft, flags=re.S).group(1)
 cmds = []
@@ -129,6 +135,30 @@ if "pkg update -y && pkg install -y git && git clone https://github.com/$owner/$
     ok("tools/publish.sh prints the same install line")
 else:
     bad("tools/publish.sh prints a different install line than the README")
+
+# the check that needs no install (check.sh): its one-liner is in the README for the same repository as the install line,
+# check.sh downloads that repository by default, and publish.sh prints the line as well
+install_repo = found[0] if found else None
+check_re = re.compile(r"bash <\(curl -fsSL https://raw\.githubusercontent\.com/([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)/main/check\.sh\)")
+cfound = [c for c in check_re.findall(readme) if c != "owner/name"]    # "owner/name" is the README's example for a fork
+if cfound and set(cfound) == {install_repo}:
+    ok("the check line (check.sh) is in the README %d time(s), for the same repository as the install line" % len(cfound))
+else:
+    bad("the check line in the README is missing, or names another repository than the install line: %r (install line: %r)" % (cfound, install_repo))
+check_sh = read("check.sh")
+m = re.search(r"local repo=\$\{SPFT_REPO:-([^}]+)\}", check_sh)
+if m and m.group(1) == install_repo:
+    ok("check.sh downloads %s by default, the same repository as the install line" % m.group(1))
+else:
+    bad("check.sh's default repository (%r) is not the install line's (%r)" % (m.group(1) if m else None, install_repo))
+if "bash <(curl -fsSL https://raw.githubusercontent.com/$owner/$name/main/check.sh)" in publish:
+    ok("tools/publish.sh prints the check line too")
+else:
+    bad("tools/publish.sh does not print the check line")
+if slug("Check a phone first (no install)") in anchor_cache["README.md"]:
+    ok('the README section "Check a phone first (no install)" exists')
+else:
+    bad('the README section "Check a phone first (no install)" is missing')
 
 # nothing unfinished, and the placeholder only where publish.sh replaces it
 for page in docs:

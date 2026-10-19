@@ -6,8 +6,11 @@ Back to the [README](../README.md).
 
 1. [SP Flash Tool error codes](#sp-flash-tool-error-codes)
 2. [The device is not detected](#the-device-is-not-detected)
-3. [Problems with spft itself](#problems-with-spft-itself)
-4. [Start again from zero](#start-again-from-zero)
+3. [The "Invalid linux kernel version" message](#the-invalid-linux-kernel-version-message)
+4. [Problems with spft itself](#problems-with-spft-itself)
+5. [Start again from zero](#start-again-from-zero)
+
+Not sure that a phone can be the host at all? [Check it without installing spft](../README.md#check-a-phone-first-no-install).
 
 ## SP Flash Tool error codes
 
@@ -66,6 +69,38 @@ The tool says nothing at all when you connect the target, or reports `1013`.
    In *preloader* mode (USB id `0e8d:2000`) the device is only there for a few seconds after power-on. In *BROM* mode (`0e8d:0003`) it stays longer. If nothing ever appears, the host does not see the target at all: look at the cable, the adapter, the key, or whether the target is really dead (a device with a flat battery needs some minutes of charging first).
 6. **Another host:** a different phone as the host settles whether the problem is the host or the target.
 
+## The "Invalid linux kernel version" message
+
+When SP Flash Tool v5 starts, it can open a window that says
+
+> Invalid linux kervel version. Please upgrade linux kernel up to at least 4.19.14!
+
+(the tool misspells *kernel*). In its messages it also prints `cur_kernel_version = 4.19.127`, so it did read your kernel correctly.
+
+**What spft does.** Kernel 4.19.127 is *newer* than 4.19.14, so the message is wrong for it. The tool seems to compare the two versions **as text**, and as text `4.19.127` sorts before `4.19.14` (the character after `4.19.1` is `2`, and `2` is smaller than `4`). That would reject exactly the kernels **4.19.100 to 4.19.139**, which many phones and tablets run. This is an explanation that fits what the tool prints, **not something confirmed**: the tool is closed source.
+
+For those kernels, and only for those, spft starts the tool with a tiny library (`lib/kernelfix.so.b64`, built from `tools/kernelfix.s`) that makes the system call `uname()` report kernel `4.19.140` to the tool. Nothing else changes: the other fields, and every other program, still see the real kernel. You see one line when the tool starts:
+
+```
+kernel 4.19.127: SP Flash Tool v5 refuses kernels like this one by mistake (it seems to compare versions as text), so it is shown 4.19.140.
+```
+
+`spft check` shows the same in its `kernel-ver` row.
+
+**Your choice: `SPFT_FAKE_KERNEL`.** Put it in front of the command:
+
+| Command | Effect |
+|---|---|
+| `spft` | The default (`auto`): the fix is used only for kernels 4.19.100 to 4.19.139 |
+| `SPFT_FAKE_KERNEL=off spft` | Never change what the tool sees. Use it to find out whether the tool needs the fix on your kernel |
+| `SPFT_FAKE_KERNEL=5.4.0 spft` | Always show this version (letters, digits and `. _ + -`, at most 64 characters) |
+
+**A kernel older than 4.19.14** (a line in `spft check` says so) may be refused by the tool, but it does not have to be: how the tool looks at the version is not known, so try `spft` first. `auto` leaves such a kernel alone. If the message comes, `SPFT_FAKE_KERNEL=5.4.0 spft` shows the tool another version. That is **at your own risk**: the tool asks for a newer kernel for a reason that is not known, and a flash that fails halfway can damage the target. [mtkclient](https://github.com/bkerler/mtkclient) has no such condition.
+
+**If the message still comes** although spft said it shows 4.19.140: run `SPFT_FAKE_KERNEL=off spft` once and `SPFT_FAKE_KERNEL=5.4.0 spft` once, and tell what each did (together with the output of `spft check`). The fix has only been tested with stand-in programs on a PC and with a real program that loads the library; it has **not** been tried with the real tool under box64 on a phone.
+
+**Why the library does not need Debian's libc.** It is a few dozen machine instructions that make the system call themselves, so it loads into any x86-64 program. box64 loads it first (`BOX64_LD_PRELOAD`), and `uname()` is then answered by it. You can rebuild it from the source with `bash tools/build-kernelfix.sh`.
+
 ## Problems with spft itself
 
 | You see | Cause | What to do |
@@ -80,6 +115,12 @@ The tool says nothing at all when you connect the target, or reports `1013`.
 | `the arm64 Debian won't run on this phone: ...` | The kernel or ROM blocks chroot. | Run `spft check`. Another host phone may be needed. |
 | `box64 self-test FAILED` | The emulator does not run on this phone. | Run `spft install` again. If it fails again, use another host phone. |
 | `the Termux:X11 server did not start` | The Termux:X11 **app** is missing (the `termux-x11-nightly` package alone is not enough). | Install the app ([README, section 2](../README.md#2-install-the-apps)), open it once, run `spft` again. |
+| `x11-app : NOT installed`, but the app is installed | An older spft asked Android for the list of apps as the normal Termux user. Since Android 11 a normal app is not shown the other apps, so Termux:X11 was missing from the list. | `spft update`. spft now asks root first, which sees every app (it reads `/data/system/packages.list`). The app can come from F-Droid or from GitHub: spft only looks that it is installed. |
+| The install seems stuck at `arm64 + x86_64 libraries` | It is the longest part (about 90 packages), and older versions of spft printed nothing for minutes while apt worked. | Look at the screen: counters like `downloaded 14.2 of 38.2 MB (37%)` and `[12/77]`, or a `still working` line every 20 seconds, mean that it is busy. If **nothing** new appears for 10 minutes, press Ctrl+C and run `bash ~/spft/install.sh` again: it carries on and keeps the downloaded files. |
+| `The setup stopped in step: ...` | A command inside Debian failed. The step is named, and the lines above say why (often: no internet). | Fix that, then run `spft install` again. |
+| A red `[BOX64] Error: ... is not an executable file` during the install | Older versions of spft chose the wrong file for the self-test: the package `busybox-static` also contains a *text* file called `busybox` (in `usr/share/initramfs-tools`), and box64 was asked to run it. box64 itself was fine. | `spft update`, then `spft install` (the setup is repeated once, and the self-test now takes the real program). |
+| Lines like `Cannot dlopen` or `Error loading needed lib` when the tool starts | box64 mentions libraries it could not load by name, and goes on. This is the normal start. | Nothing. A real problem is a **red** `[BOX64]` in front of `Error:`. |
+| `Invalid linux kervel version. Please upgrade linux kernel up to at least 4.19.14!` | The tool compares kernel versions badly. | [See above](#the-invalid-linux-kernel-version-message). |
 | Black or empty Termux:X11 screen | An old or dead server is in the way (Android may have killed it and left its socket file behind). | `spft stop` (it also stops the Termux:X11 server and removes that socket file), swipe Termux:X11 away from Recents, run `spft`. |
 | The picture is upside down | The phone's landscape is the other way. | `spft x11 reverse` |
 | The tool window is too big or too small | | `spft x11 zoom=130` (smaller) or `zoom=170` (bigger). Above about 160 the tool is taller than the screen. |

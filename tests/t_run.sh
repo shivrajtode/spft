@@ -52,6 +52,12 @@ cat > "$T/bin/box64" <<'EOF'
 #!/bin/bash
 echo "BOX64 args=[$*] DISPLAY=$DISPLAY NOMITSHM=$QT_X11_NO_MITSHM QTPLUG=${QT_PLUGIN_PATH:-unset}"
 echo "BOX64 libpath=$BOX64_LD_LIBRARY_PATH"
+echo "BOX64 preload=${BOX64_LD_PRELOAD:-unset}"
+EOF
+# uname -r says what FAKE_UNAME_R says (the kernel of the phone)
+cat > "$T/bin/uname" <<'EOF'
+#!/bin/bash
+if [ "${1:-}" = -r ]; then echo "${FAKE_UNAME_R:-5.10.0}"; else exec /usr/bin/uname "$@"; fi
 EOF
 cat > "$T/bin/spft-gui" <<'EOF'
 #!/bin/bash
@@ -71,6 +77,8 @@ sed -e "s#/opt#$T/opt#g" \
     -e "s#/tmp/spft-openbox0\.pid#$T/ob.pid#g" \
     -e "s#/tmp/openbox0\.log#$T/ob0.log#g" \
     -e "s#/tmp/runtime-root#$T/rt#g" \
+    -e "s#/tmp/spft-fake-kernel#$T/fake-kernel#g" \
+    -e "s#/tmp/spft-kernelfix\.so#$T/kernelfix.so#g" \
     -e "s#/etc/xdg/openbox#$T/etc-openbox#g" "$REPO/lib/run.sh" > "$T/spft-run"
 if grep -n '/tmp/\|/opt\|/etc/' "$T/spft-run" | grep -v "$T"; then echo "NOTE: unreplaced fixed paths above"; fi
 
@@ -110,7 +118,7 @@ sleep 1
 run; echo "exit=$?"
 kill "$DECOY" 2>/dev/null; wait "$DECOY" 2>/dev/null
 echo "--- once it is gone, the tool starts normally again:"
-run | tail -n 2
+run | grep -E '^BOX64 (args|libpath)='
 
 echo; echo "=== 9. same, when only the process NAME is flash_tool (the command line was rewritten)"
 mkdir -p "$T/ft"; cp "$(type -P sleep)" "$T/ft/flash_tool"
@@ -122,7 +130,7 @@ kill "$DECOY" 2>/dev/null; wait "$DECOY" 2>/dev/null
 echo; echo "=== 10. Termux:X11, first start: rc.xml is made from Debian's default, plus one maximize rule"
 sock_up
 rm -f "$T/openbox.log" "$T/openbox-reconf.log" "$T/ob.pid" "$T/home/.config/openbox/rc.xml"
-run SPFT_DISPLAY=x11 | sed -n '1,2p'
+run SPFT_DISPLAY=x11 | grep -E '^(display:|starting SP Flash Tool)'
 RC=$T/home/.config/openbox/rc.xml
 python3 -I -c '
 import sys, xml.dom.minidom as m
@@ -176,6 +184,36 @@ bash -c 'exec -a "box64 ./SPFlashToolV6" sleep 30' & DECOY=$!
 sleep 1
 run SPFT_DISPLAY=vnc | head -n 1; echo "exit=${PIPESTATUS[0]}"
 kill "$DECOY" 2>/dev/null; wait "$DECOY" 2>/dev/null
+
+echo; echo "=== 17. kernel 4.19.127: SP Flash Tool v5 wrongly rejects it (a text comparison), so it is shown 4.19.140"
+rm -rf "$T/opt"; mkdir -p "$T/opt/v5"; : > "$T/opt/v5/flash_tool"
+run SPFT_DISPLAY=vnc SPFT_LIBDIR="$REPO/lib" FAKE_UNAME_R=4.19.127-g8d3429bdb336 | grep -E '^kernel|^\(to turn|preload=|BOX64 args' | sed "s#$T#\$T#g"
+echo "the file the library reads says: $(cat "$T/fake-kernel")"
+if base64 -d "$REPO/lib/kernelfix.so.b64" | cmp -s - "$T/kernelfix.so"; then echo "ok: the library was decoded from lib/kernelfix.so.b64"; else echo "FAIL: the decoded library differs"; fi
+
+echo; echo "=== 18. a kernel the tool accepts: nothing is shown, no library is loaded, and the file of the last run is gone"
+run SPFT_DISPLAY=vnc SPFT_LIBDIR="$REPO/lib" FAKE_UNAME_R=5.10.0 | grep -E '^kernel|preload=' | sed "s#$T#\$T#g"
+if [ -e "$T/fake-kernel" ]; then echo "FAIL: the old fake-kernel file is still there"; else echo "ok: no fake-kernel file"; fi
+
+echo; echo "=== 19. an old kernel (4.14.186): left alone; SPFT_FAKE_KERNEL=5.4.0 forces a version"
+run SPFT_DISPLAY=vnc SPFT_LIBDIR="$REPO/lib" FAKE_UNAME_R=4.14.186 | grep -E '^kernel|preload=' | sed "s#$T#\$T#g"
+run SPFT_DISPLAY=vnc SPFT_LIBDIR="$REPO/lib" FAKE_UNAME_R=4.14.186 SPFT_FAKE_KERNEL=5.4.0 | grep -E '^kernel|preload=' | sed "s#$T#\$T#g"
+echo "the file says: $(cat "$T/fake-kernel")"
+
+echo; echo "=== 20. SPFT_FAKE_KERNEL=off turns the fix off, also for 4.19.127"
+run SPFT_DISPLAY=vnc SPFT_LIBDIR="$REPO/lib" FAKE_UNAME_R=4.19.127 SPFT_FAKE_KERNEL=off | grep -E '^kernel|preload=' | sed "s#$T#\$T#g"
+if [ -e "$T/fake-kernel" ]; then echo "FAIL: a fake-kernel file exists"; else echo "ok: no fake-kernel file"; fi
+
+echo; echo "=== 21. a bad SPFT_FAKE_KERNEL is refused with a message, and the tool still starts"
+run SPFT_DISPLAY=vnc SPFT_LIBDIR="$REPO/lib" FAKE_UNAME_R=4.19.127 'SPFT_FAKE_KERNEL=5.4;touch /tmp/pwned' | grep -E '^SPFT_FAKE|preload=|BOX64 args' | sed "s#$T#\$T#g"
+if [ -e /tmp/pwned ]; then echo "FAIL: the value was run as a command"; rm -f /tmp/pwned; else echo "ok: nothing was run"; fi
+
+echo; echo "=== 22. a BOX64_LD_PRELOAD that is already set stays, the fix comes first"
+run SPFT_DISPLAY=vnc SPFT_LIBDIR="$REPO/lib" FAKE_UNAME_R=4.19.139 BOX64_LD_PRELOAD=/opt/other.so | grep -E 'preload=' | sed "s#$T#\$T#g"
+
+echo; echo "=== 23. the kernel-fix files are not there (an old Debian setup): the tool simply starts"
+mkdir -p "$T/emptylib"
+run SPFT_DISPLAY=vnc SPFT_LIBDIR="$T/emptylib" FAKE_UNAME_R=4.19.127 | grep -E '^kernel|preload=|BOX64 args' | sed "s#$T#\$T#g"
 
 pkill -f "sleep 25" 2>/dev/null
 if grep -qF "$T" /proc/mounts; then echo "mounts under $T - not deleting"; else rm -rf "$T"; echo "cleaned up"; fi

@@ -1,7 +1,8 @@
 #!/bin/bash
 # Runs every test in this folder, with stand-ins for su, mount, chroot, curl, pkg ... so nothing real is touched.
 # For a Linux PC or a sandbox - NOT for a phone (the tests refuse to run where /system/bin/mount exists).
-# Needs: bash, python3, git, zip, unzip, tar, gzip, sha256sum, cksum, sed, grep, pgrep.
+# Needs: bash, python3, git, zip, unzip, tar, gzip, base64, sha256sum, cksum, sed, grep, pgrep.
+# (t_kernelfix also uses readelf, as, ld, objcopy and an x86-64 Linux when they are there, and skips what it cannot do.)
 #
 #   bash tests/run_all.sh            run them all (takes about a minute)
 #   bash tests/run_all.sh --update   after a change you made on purpose: store the new expected output
@@ -21,7 +22,7 @@ norm() {
 }
 
 failed=0
-for t in t_run t_host t_tool t_install t_publish t_docs; do
+for t in t_run t_host t_tool t_install t_provision t_check t_kernelfix t_publish t_docs; do
   printf '%-10s ' "$t"
   bash "./$t.sh" > "$OUT/$t.out" 2>&1
   rc=$?

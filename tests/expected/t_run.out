@@ -1,16 +1,22 @@
 === 1. no X11 socket, auto -> VNC with a hint
 (Termux:X11 not detected - for the faster display, run 'spft' in Termux)
 spft-gui called
+box64 prints a few 'Cannot dlopen' / 'Error loading needed lib' lines at the start. They are normal.
+Only a red BOX64 in front of 'Error:' is a real problem.
 starting SP Flash Tool from $T/opt/SP_Flash_Tool_test (Ctrl+C to stop)
 BOX64 args=[./flash_tool] DISPLAY=:1 NOMITSHM=1 QTPLUG=$T/opt/SP_Flash_Tool_test/plugins
 BOX64 libpath=$T/opt/SP_Flash_Tool_test/lib:$T/opt/SP_Flash_Tool_test:/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu
+BOX64 preload=unset
 exit=0
 
 === 2. X11 socket present, auto -> Termux:X11
 display: Termux:X11
+box64 prints a few 'Cannot dlopen' / 'Error loading needed lib' lines at the start. They are normal.
+Only a red BOX64 in front of 'Error:' is a real problem.
 starting SP Flash Tool from $T/opt/SP_Flash_Tool_test (Ctrl+C to stop)
 BOX64 args=[./flash_tool] DISPLAY=:0 NOMITSHM=1 QTPLUG=$T/opt/SP_Flash_Tool_test/plugins
 BOX64 libpath=$T/opt/SP_Flash_Tool_test/lib:$T/opt/SP_Flash_Tool_test:/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu
+BOX64 preload=unset
 exit=0
 openbox starts so far: 1
 
@@ -19,9 +25,12 @@ openbox starts so far: 1
 
 === 4. forced vnc while socket exists -> VNC
 spft-gui called
+box64 prints a few 'Cannot dlopen' / 'Error loading needed lib' lines at the start. They are normal.
+Only a red BOX64 in front of 'Error:' is a real problem.
 starting SP Flash Tool from $T/opt/SP_Flash_Tool_test (Ctrl+C to stop)
 BOX64 args=[./flash_tool] DISPLAY=:1 NOMITSHM=1 QTPLUG=$T/opt/SP_Flash_Tool_test/plugins
 BOX64 libpath=$T/opt/SP_Flash_Tool_test/lib:$T/opt/SP_Flash_Tool_test:/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu
+BOX64 preload=unset
 exit=0
 
 === 5. forced x11 without socket -> clear message, exit 1
@@ -82,4 +91,39 @@ BOX64 args=[./SPFlashToolV6] DISPLAY=:1 NOMITSHM=1 QTPLUG=unset
 === 16. a running SPFlashToolV6 also blocks a second copy
 SP Flash Tool is already running (pid N), so no second copy is started.
 exit=0
+
+=== 17. kernel 4.19.127: SP Flash Tool v5 wrongly rejects it (a text comparison), so it is shown 4.19.140
+kernel 4.19.127-g8d3429bdb336: SP Flash Tool v5 refuses kernels like this one by mistake (it seems to compare versions as text), so it is shown 4.19.140.
+(to turn this off: SPFT_FAKE_KERNEL=off spft)
+BOX64 args=[./flash_tool] DISPLAY=:1 NOMITSHM=1 QTPLUG=unset
+BOX64 preload=$T/kernelfix.so
+the file the library reads says: 4.19.140
+ok: the library was decoded from lib/kernelfix.so.b64
+
+=== 18. a kernel the tool accepts: nothing is shown, no library is loaded, and the file of the last run is gone
+BOX64 preload=unset
+ok: no fake-kernel file
+
+=== 19. an old kernel (4.14.186): left alone; SPFT_FAKE_KERNEL=5.4.0 forces a version
+BOX64 preload=unset
+kernel 4.14.186: SP Flash Tool is shown the kernel version 5.4.0, as SPFT_FAKE_KERNEL says.
+BOX64 preload=$T/kernelfix.so
+the file says: 5.4.0
+
+=== 20. SPFT_FAKE_KERNEL=off turns the fix off, also for 4.19.127
+BOX64 preload=unset
+ok: no fake-kernel file
+
+=== 21. a bad SPFT_FAKE_KERNEL is refused with a message, and the tool still starts
+SPFT_FAKE_KERNEL must be auto, off, or a version like 5.4.0 - ignoring '5.4;touch /tmp/pwned'
+BOX64 args=[./flash_tool] DISPLAY=:1 NOMITSHM=1 QTPLUG=unset
+BOX64 preload=unset
+ok: nothing was run
+
+=== 22. a BOX64_LD_PRELOAD that is already set stays, the fix comes first
+BOX64 preload=$T/kernelfix.so:/opt/other.so
+
+=== 23. the kernel-fix files are not there (an old Debian setup): the tool simply starts
+BOX64 args=[./flash_tool] DISPLAY=:1 NOMITSHM=1 QTPLUG=unset
+BOX64 preload=unset
 cleaned up

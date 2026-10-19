@@ -1,6 +1,6 @@
 === A. x11 without termux-x11 installed
 spft: termux-x11 is not installed. In Termux run:  pkg install x11-repo  and then  pkg install termux-x11-nightly
-     (and install the Termux:X11 app: the file termux-x11-universal-debug.apk from
+     (and, if you do not have it yet, the Termux:X11 app: the file termux-x11-universal-debug.apk from
       https://github.com/termux/termux-x11/releases/tag/nightly - or run: bash install.sh)
 exit=1
 
@@ -44,6 +44,8 @@ SPFT_DISPLAY=x11 spft-run
 -rwxr-xr-x spft-run
 spft-run identical to lib/run.sh
 spft-gui identical to lib/gui.sh
+kernelfix.sh identical to lib/kernelfix.sh (spft-run reads it in Debian)
+kernelfix.so.b64 identical to lib/kernelfix.so.b64
 --- file-dialog shortcuts (top level of Debian, then Debian's home):
 /sdcard -> /mnt/sdcard
 ~/Download -> /mnt/sdcard/Download
@@ -230,40 +232,175 @@ tool started: 1
 exit=0
 tool started: 1
 
-=== X. spft check (the Termux part, then the phone part) with the Termux:X11 app installed
+=== X. spft check, Android 11 style: Termux:X11 is in ROOT's package list, the normal user's pm does not show it
 == Termux ==
-root     : su found
-x11-pkg  : installed
-x11-app  : Termux:X11 app installed
-storage  : run termux-setup-storage once if you want Termux to see your Download folder (optional)
+(your root app may ask now: press ALLOW for Termux)
+root      : su found, and root works
+x11-pkg   : installed
+x11-app   : Termux:X11 app installed
+storage   : run termux-setup-storage once if you want Termux to see your Download folder (optional)
 == phone and Debian ==
-kernel   : 64-bit ARM (CONFIG_ARM64=y) - OK, a 32-bit Android userspace doesn't matter
-cdc_acm  : MISSING - this kernel was built without it (CONFIG_USB_ACM), so SP Flash Tool can't see a device from this phone (use mtkclient instead)
-chroot   : $T/sysbin/chroot
-android  : unknown (API ?), ABIs: ?
-debian   : installed in $T/root
-box64    : missing - run: spft install
-tool     : NOT installed - run: spft tool
+kernel    : 64-bit ARM (CONFIG_ARM64=y) - OK, a 32-bit Android userspace doesn't matter
+kernel-ver: 5.10.43-android12-9 - OK for SP Flash Tool v5 (it asks for 4.19.14 or newer)
+cdc_acm   : MISSING - this kernel was built without it (CONFIG_USB_ACM), so SP Flash Tool can't see a device from this phone (use mtkclient instead)
+chroot    : $T/sysbin/chroot
+android   : unknown (API ?), ABIs: ?
+debian    : installed in $T/root
+box64     : not installed yet (spft install does that)
+tool      : not installed yet (spft install gets it, or: spft tool)
+
+== Result ==
+spft can be installed and started on this device.
+Keep in mind:
+ - this kernel has no cdc_acm driver (CONFIG_USB_ACM), so SP Flash Tool can't talk to a device from this phone. spft still installs and starts here, which is enough to try it out; to flash, use a phone whose kernel has the driver (or mtkclient)
 exit=0
+-- the same question the way install.sh asks it:
+app-installed: exit=0
 
 === X1. cdc_acm: what the kernel config says when the driver folder is missing
 -- FAKE_ACM=m
-cdc_acm  : NOT LOADED - this kernel has the driver as a module. Try:  su -c 'modprobe cdc_acm'  and run spft check again
+cdc_acm   : NOT LOADED - this kernel has the driver as a module. Try:  su -c 'modprobe cdc_acm'  and run spft check again
 -- FAKE_ACM=y
-cdc_acm  : not found, although the kernel config says it is built in. If the target is never detected, use another host phone (or mtkclient)
+cdc_acm   : not found, although the kernel config says it is built in. If the target is never detected, use another host phone (or mtkclient)
 -- FAKE_ACM=n
-cdc_acm  : MISSING - this kernel was built without it (CONFIG_USB_ACM), so SP Flash Tool can't see a device from this phone (use mtkclient instead)
+cdc_acm   : MISSING - this kernel was built without it (CONFIG_USB_ACM), so SP Flash Tool can't see a device from this phone (use mtkclient instead)
 -- FAKE_ACM=none
-cdc_acm  : not found, and the kernel config can't be read to tell why. If the target is never detected, use another host phone (or mtkclient)
+cdc_acm   : not found, and the kernel config can't be read to tell why. If the target is never detected, use another host phone (or mtkclient)
 -- FAKE_ACM=(option not in the config)
-cdc_acm  : MISSING - this kernel was built without it (CONFIG_USB_ACM), so SP Flash Tool can't see a device from this phone (use mtkclient instead)
+cdc_acm   : MISSING - this kernel was built without it (CONFIG_USB_ACM), so SP Flash Tool can't see a device from this phone (use mtkclient instead)
 
-=== X2. ... with the app missing
-x11-app  : NOT installed - get termux-x11-universal-debug.apk: https://github.com/termux/termux-x11/releases/tag/nightly
+=== X2. the app is not in root's package list: NOT installed
+x11-app   : NOT installed - get the Termux:X11 app, for example the nightly APK termux-x11-universal-debug.apk from https://github.com/termux/termux-x11/releases/tag/nightly
 exit=0
+app-installed: exit=1
+-- a package that only STARTS with the app's name is not the app
+app-installed: exit=1
+-- ... but if pm does list the app, it is installed: any source that says yes wins (a false NOT installed is the worse mistake)
+app-installed: exit=0
 
-=== X3. ... when the phone's package manager can't be asked
-x11-app  : could not tell (open the Termux:X11 app once to check)
+=== X3. root can read no package list: the app's data folder tells
+-- the base folders exist, the app's folder does not:
+app-installed: exit=1
+-- the app's folder exists (main user):
+app-installed: exit=0
+-- the app's folder exists (the old /data/data place):
+app-installed: exit=0
+
+=== X3b. root can tell nothing (no list, no folders): pm of the normal user is the only source
+-- pm lists the app:
+x11-app   : Termux:X11 app installed
+app-installed: exit=0
+-- pm does not list it: only 'could not tell', never a false NOT installed
+x11-app   : could not tell if the Termux:X11 app is installed (Android hides other apps from Termux). If it is not, get it from https://github.com/termux/termux-x11/releases/tag/nightly
+app-installed: exit=2
+-- pm can't be asked either:
+x11-app   : could not tell if the Termux:X11 app is installed (Android hides other apps from Termux). If it is not, get it from https://github.com/termux/termux-x11/releases/tag/nightly
+
+=== X4. root refused: the Termux part is shown, the phone part is skipped (exit 1); the app is asked of pm
+== Termux ==
+(your root app may ask now: press ALLOW for Termux)
+root      : su found, but root was REFUSED - open your root app and allow Termux (KernelSU, APatch: switch Termux on in the Superuser list), then run this again
+x11-pkg   : installed
+x11-app   : Termux:X11 app installed
+storage   : run termux-setup-storage once if you want Termux to see your Download folder (optional)
+== phone and Debian ==
+(skipped: this part needs root)
+exit=1
+
+=== X5. no su at all (a phone that is not rooted)
+== Termux ==
+root      : NOT FOUND - this needs a rooted phone (Magisk, KernelSU, ...)
+x11-pkg   : MISSING - run: pkg install x11-repo && pkg install termux-x11-nightly
+x11-app   : could not tell if the Termux:X11 app is installed (Android hides other apps from Termux). If it is not, get it from https://github.com/termux/termux-x11/releases/tag/nightly
+storage   : run termux-setup-storage once if you want Termux to see your Download folder (optional)
+== phone and Debian ==
+(skipped: this part needs root)
+exit=1
+
+=== X6. the kernel version row (SP Flash Tool v5 wants 4.19.14 or newer, and misreads 4.19.100 to 4.19.139)
+-- kernel 4.19.127-g8d3429bdb336
+kernel-ver: 4.19.127-g8d3429bdb336 - SP Flash Tool v5 may refuse this kernel by mistake (it seems to compare versions as text). spft works around that by itself when it starts the tool
+-- kernel 4.19.100
+kernel-ver: 4.19.100 - SP Flash Tool v5 may refuse this kernel by mistake (it seems to compare versions as text). spft works around that by itself when it starts the tool
+-- kernel 4.19.139
+kernel-ver: 4.19.139 - SP Flash Tool v5 may refuse this kernel by mistake (it seems to compare versions as text). spft works around that by itself when it starts the tool
+-- kernel 4.19.140
+kernel-ver: 4.19.140 - OK for SP Flash Tool v5 (it asks for 4.19.14 or newer)
+-- kernel 4.19.14
+kernel-ver: 4.19.14 - OK for SP Flash Tool v5 (it asks for 4.19.14 or newer)
+-- kernel 4.19.13
+kernel-ver: 4.19.13 - older than the 4.19.14 that SP Flash Tool v5 asks for. The tool may refuse it, so try spft first. If it says "Invalid linux kernel version": SPFT_FAKE_KERNEL=5.4.0 spft (at your own risk)
+ - the kernel (4.19.13) is older than the 4.19.14 that SP Flash Tool v5 asks for, so the tool may stop with "Invalid linux kernel version" (try it first; if it does, SPFT_FAKE_KERNEL=5.4.0 spft shows it another version - your own risk; mtkclient has no such limit)
+-- kernel 4.14.186
+kernel-ver: 4.14.186 - older than the 4.19.14 that SP Flash Tool v5 asks for. The tool may refuse it, so try spft first. If it says "Invalid linux kernel version": SPFT_FAKE_KERNEL=5.4.0 spft (at your own risk)
+ - the kernel (4.14.186) is older than the 4.19.14 that SP Flash Tool v5 asks for, so the tool may stop with "Invalid linux kernel version" (try it first; if it does, SPFT_FAKE_KERNEL=5.4.0 spft shows it another version - your own risk; mtkclient has no such limit)
+-- kernel 3.18.140-perf
+kernel-ver: 3.18.140-perf - older than the 4.19.14 that SP Flash Tool v5 asks for. The tool may refuse it, so try spft first. If it says "Invalid linux kernel version": SPFT_FAKE_KERNEL=5.4.0 spft (at your own risk)
+ - the kernel (3.18.140-perf) is older than the 4.19.14 that SP Flash Tool v5 asks for, so the tool may stop with "Invalid linux kernel version" (try it first; if it does, SPFT_FAKE_KERNEL=5.4.0 spft shows it another version - your own risk; mtkclient has no such limit)
+-- kernel 5.10.43-android12-9
+kernel-ver: 5.10.43-android12-9 - OK for SP Flash Tool v5 (it asks for 4.19.14 or newer)
+-- kernel 6.1.75
+kernel-ver: 6.1.75 - OK for SP Flash Tool v5 (it asks for 4.19.14 or newer)
+-- kernel garbage
+kernel-ver: garbage (could not read the version)
+-- the kernel version can't be read
+kernel-ver: unknown (could not read the version)
+
+=== X7. the Result block: what blocks spft, and what to keep in mind
+-- the tablet from the report: Android 11, kernel 4.19.127, no cdc_acm, plenty of space
+== phone and Debian ==
+kernel    : 64-bit ARM (CONFIG_ARM64=y) - OK, a 32-bit Android userspace doesn't matter
+kernel-ver: 4.19.127-g8d3429bdb336 - SP Flash Tool v5 may refuse this kernel by mistake (it seems to compare versions as text). spft works around that by itself when it starts the tool
+cdc_acm   : MISSING - this kernel was built without it (CONFIG_USB_ACM), so SP Flash Tool can't see a device from this phone (use mtkclient instead)
+chroot    : $T/sysbin/chroot
+android   : 11 (API 30), ABIs: arm64-v8a,armeabi-v7a,armeabi
+free      : 12000 MB on /data (the install needs about 3000)
+debian    : installed in $T/root
+box64     : not installed yet (spft install does that)
+tool      : not installed yet (spft install gets it, or: spft tool)
+
+== Result ==
+spft can be installed and started on this device.
+Keep in mind:
+ - this kernel has no cdc_acm driver (CONFIG_USB_ACM), so SP Flash Tool can't talk to a device from this phone. spft still installs and starts here, which is enough to try it out; to flash, use a phone whose kernel has the driver (or mtkclient)
+-- a phone that has everything: no 'Keep in mind' at all
+== Result ==
+spft can be installed and started on this device.
+-- a 32-bit kernel: spft cannot run (a blocker)
+== Result ==
+spft can NOT run on this device, because:
+ - the kernel is not 64-bit ARM, and box64 (the emulator) needs that
+-- 900 MB free, below the 1500 that the install insists on (a blocker)
+free      : 900 MB on /data (the install needs about 3000)
+== Result ==
+spft can NOT run on this device, because:
+ - only 900 MB are free on /data, and the install needs about 3000 (it refuses below 1500)
+-- 2500 MB free: it can run, but it is tight
+== Result ==
+spft can be installed and started on this device.
+Keep in mind:
+ - 2500 MB are free on /data: tight, the install needs about 3000
+-- no chroot command (a blocker)
+chroot    : NOT FOUND
+== Result ==
+spft can NOT run on this device, because:
+ - there is no chroot command (tried /system/bin, /system/xbin and Termux)
+-- Android 13: the hint to the README section on killed background processes
+== Result ==
+spft can be installed and started on this device.
+Keep in mind:
+ - Android 12 or newer: Android may kill background processes. If SP Flash Tool or Termux closes by itself, see the README, section "Android 12 and newer".
+-- an old kernel, no driver, 32-bit: everything at once
+== Result ==
+spft can NOT run on this device, because:
+ - the kernel is not 64-bit ARM, and box64 (the emulator) needs that
+ - only 1000 MB are free on /data, and the install needs about 3000 (it refuses below 1500)
+Keep in mind:
+ - the kernel (3.18.71) is older than the 4.19.14 that SP Flash Tool v5 asks for, so the tool may stop with "Invalid linux kernel version" (try it first; if it does, SPFT_FAKE_KERNEL=5.4.0 spft shows it another version - your own risk; mtkclient has no such limit)
+ - this kernel has no cdc_acm driver (CONFIG_USB_ACM), so SP Flash Tool can't talk to a device from this phone. spft still installs and starts here, which is enough to try it out; to flash, use a phone whose kernel has the driver (or mtkclient)
+ - Android 12 or newer: Android may kill background processes. If SP Flash Tool or Termux closes by itself, see the README, section "Android 12 and newer".
+-- the check is only a read: it changed nothing in Debian
+ok: no marker written
 
 === U. spft update: git pull, then the install step runs again (here the pkg stand-in stops it)
 
