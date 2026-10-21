@@ -25,6 +25,8 @@ count() { grep -c -- "$1" "$LOG" || true; }
 #   FAKE_APT_SLOW=N         every update and every install takes N seconds (so that the "still working" line shows up)
 #   FAKE_APT_SIZE=BYTES     size of every .deb (default 200000)
 #   FAKE_APT_BOX64=fail     installing box64-android fails (the repository is down)
+#   FAKE_APT_PLAN_SLOW=N    every dry run (install -s, --print-uris) takes N seconds, like apt reading a big package cache
+#   FAKE_APT_WARN=1         the real install prints the harmless warnings of the real packages (Exec format error, systemctl)
 cat > "$T/bin/apt-get" <<'EOF'
 #!/bin/bash
 echo "apt-get $*" >> "$TLOG"
@@ -58,6 +60,7 @@ case $sub in
     for p in "${pk[@]}"; do : > "$(fname "$p" | sed 's/_1.0_/_1.37-1_/')"; echo "Get:1 http://deb.example/debian trixie/main amd64 ${p%%:*} amd64 1.37-1 [1,000 kB]"; done ;;
   install)
     if [ "$sim" = 1 ] || [ "$uris" = 1 ]; then
+      sleep "${FAKE_APT_PLAN_SLOW:-0}"
       badn=0
       for p in "${pk[@]}"; do case " ${FAKE_APT_UNKNOWN:-} " in *" $p "*) echo "E: Unable to locate package $p"; badn=1 ;; esac; done
       [ "$badn" = 0 ] || exit 100
@@ -88,6 +91,16 @@ case $sub in
     for p in $(todo); do echo "Unpacking ${p} (1.0) ..."; done
     for p in $(todo); do
       echo "Setting up ${p} (1.0) ..."
+      if [ "${FAKE_APT_WARN:-}" = 1 ]; then
+        case $p in
+          libglib2.0-0:amd64)
+            echo "/var/lib/dpkg/info/libglib2.0-0t64:amd64.postinst: 41: /usr/lib/x86_64-linux-gnu/glib-2.0/gio-querymodules: Exec format error"
+            echo "/var/lib/dpkg/info/libglib2.0-0t64:amd64.postinst: 42: /usr/lib/x86_64-linux-gnu/glib-2.0/glib-compile-schemas: Exec format error" ;;
+          box64-android)
+            echo "/var/lib/dpkg/info/box64-android.postinst: line 12: systemctl: command not found"
+            echo "Restarting systemd-binfmt failed" ;;
+        esac
+      fi
       echo "$p" >> "$TT/installed"
       case $p in box64-android | box64*) : > "$TT/box64-installed" ;; esac
     done
@@ -266,6 +279,129 @@ head -c 100000 /dev/zero > "$T/var/cache/apt/archives/partial/libx11-6_1.0_arm64
 run > "$T/out" 2>&1; rc=$?
 [ "$rc" = 0 ] && ok "the run completes" || bad "exit status $rc"
 has "$T/out" 'downloaded [0-9.]* of [0-9.]* MB (100%)' "and still ends at 100%"
+
+echo; echo "=== 11. the check 'what has to be installed' was silent for a minute and looked stuck: now it shows life (no terminal: timed lines)"
+fresh
+run FAKE_APT_PLAN_SLOW=2 > "$T/out" 2>&1; rc=$?
+grep -n 'checking what has to be installed' "$T/out" | head -n 6; echo "exit=$rc"
+[ "$rc" = 0 ] && ok "exit 0" || bad "exit status $rc"
+has "$T/out" 'checking what has to be installed (up to a minute' "the intro line says what is going on"
+has "$T/out" '^   \.\.\. checking what has to be installed: still working ([0-9]*m[0-9][0-9]s)$' "while it checks, a timed line shows that it works"
+hasnt "$T/out" '\[ *=====' "no bar pictures in a file (they are drawn only on a terminal)"
+first_dpkg=$(grep -n '^dpkg --configure -a' "$LOG" | head -n 1 | cut -d: -f1)
+first_apt=$(grep -n '^apt-get ' "$LOG" | head -n 1 | cut -d: -f1)
+if [ -n "$first_dpkg" ] && [ -n "$first_apt" ] && [ "$first_dpkg" -lt "$first_apt" ]; then
+  ok "dpkg is put in order before the first apt call (an interrupted setup cannot leave it half way)"
+else
+  bad "dpkg --configure -a is not the first thing (dpkg line '$first_dpkg', first apt line '$first_apt')"
+fi
+
+echo; echo "=== 12. on a terminal the check is a bar that moves on ONE line (run on a pseudo-terminal)"
+if command -v python3 >/dev/null 2>&1; then
+  cat > "$T/pty_run.py" <<'PYEOF'
+import os, pty, select, subprocess, sys
+out, cmd = sys.argv[1], sys.argv[2:]
+master, slave = pty.openpty()
+p = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=slave, stderr=slave, close_fds=True)
+os.close(slave)
+buf = b""
+while True:
+    try:
+        r, _, _ = select.select([master], [], [], 1.0)
+        if not r:
+            if p.poll() is not None:
+                break
+            continue
+        d = os.read(master, 65536)
+    except OSError:
+        break
+    if not d:
+        break
+    buf += d
+open(out, "wb").write(buf)
+sys.exit(p.wait())
+PYEOF
+  ptyrun() { # ptyrun [VAR=value ...]   the script on a pseudo-terminal; $T/out.tty has every picture of the bar on a line of its own
+    python3 -I "$T/pty_run.py" "$T/out.raw" env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T/root" TT="$T" TLOG="$LOG" \
+      SPFT_BEAT=1 SPFT_POLL=1 SPFT_FRAME=0.1 "$@" bash "$T/provision.sh"
+    local r=$?
+    tr '\r' '\n' < "$T/out.raw" | sed 's/\x1b\[[0-9;]*[A-Za-z]//g' > "$T/out.tty"
+    return $r
+  }
+  fresh
+  ptyrun FAKE_APT_PLAN_SLOW=1; rc=$?
+  grep -n '^   \[[ =]*\]' "$T/out.tty" | sed -n '1,3p;$p'; echo "exit=$rc"
+  [ "$rc" = 0 ] && ok "exit 0 on a terminal" || bad "exit status $rc"
+  pic='^   \[ *===== *\] [0-9]*m[0-9][0-9]s *$'
+  n=$(grep -c "$pic" "$T/out.tty" || true)
+  [ "$n" -ge 8 ] && ok "the bar was drawn $n times while apt checked" || bad "only $n pictures of the bar"
+  shapes=$(grep "$pic" "$T/out.tty" | sed 's/\] .*//' | sort -u | wc -l)
+  [ "$shapes" -ge 3 ] && ok "and it moves ($shapes different positions)" || bad "the bar stands still ($shapes positions)"
+  has "$T/out.tty" '^   \[====================\] [0-9]*m[0-9][0-9]s - done$' "it ends as a full bar that says done"
+  n=$(grep -c '^   \[====================\] [0-9]*m[0-9][0-9]s - done$' "$T/out.tty" || true)
+  [ "$n" = 3 ] && ok "one bar for each of the 3 checks (base packages, libraries, box64)" || bad "$n finished bars instead of 3"
+  hasnt "$T/out.tty" 'checking what has to be installed: still working' "no timed lines in place of the bar on a terminal"
+  n=$(grep '^   \[[ =]*\]' "$T/out.tty" | awk 'length($0) > 40' | wc -l)
+  [ "$n" = 0 ] && ok "no line of the bar is longer than 40 characters (a phone held upright is about 45 wide; a longer line would wrap and could not be drawn over)" || bad "$n bar lines are longer than 40 characters"
+  has "$T/out.raw" "$(printf '\r   \\[')" "the bar is drawn over its own line (a carriage return in front of every picture)"
+
+  echo; echo "=== 13. a check that fails on a terminal: the bar is wiped and apt's message is shown"
+  fresh
+  ptyrun FAKE_APT_UNKNOWN=openbox; rc=$?
+  tail -n 5 "$T/out.tty"; echo "exit=$rc"
+  [ "$rc" != 0 ] && ok "non-zero exit" || bad "exit status 0"
+  has "$T/out.tty" 'E: Unable to locate package openbox' "apt's message is shown"
+  hasnt "$T/out.tty" '^   \[====================\] .* - done' "a failed check does not end with 'done'"
+  has "$T/out.tty" 'The setup stopped in step: base packages' "and the step where it stopped is named"
+else
+  echo "skipped: python3 is needed to run the script on a pseudo-terminal"
+fi
+
+echo; echo "=== 14. the harmless warnings of the real packages get a note that says so (once for each kind)"
+fresh
+run FAKE_APT_WARN=1 > "$T/out" 2>&1; rc=$?
+grep -n 'Exec format error\|systemctl\|systemd-binfmt\|Note:' "$T/out" | cut -c1-120; echo "exit=$rc"
+[ "$rc" = 0 ] && ok "exit 0" || bad "exit status $rc"
+has "$T/out" 'postinst: 41: .*Exec format error' "the warning line itself is still shown (nothing is hidden)"
+n=$(grep -c 'Note: the "Exec format error" lines above are harmless' "$T/out" || true)
+[ "$n" = 1 ] && ok "one note for the two 'Exec format error' lines" || bad "$n notes for Exec format error"
+n=$(grep -c 'Note: "systemctl: command not found" and "Restarting systemd-binfmt failed" are harmless too' "$T/out" || true)
+[ "$n" = 1 ] && ok "one note for the systemctl / binfmt lines" || bad "$n notes for systemctl"
+between=$(sed -n '/postinst: 42: .*Exec format error/,/Note: the "Exec format error"/p' "$T/out")
+case $between in
+  *"Setting up"*) bad "the note is not right after the warning lines" ;;
+  *"Note:"*) ok "the note follows the warning lines directly" ;;
+  *) bad "no note after the warning lines" ;;
+esac
+fresh
+run > "$T/out" 2>&1
+hasnt "$T/out" 'Note: ' "and a run without those warnings has no such notes"
+
+echo; echo "=== 15. the 'still working' loops end when the script is stopped (they printed on for ever after Ctrl+C)"
+fresh
+env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T/root" TT="$T" TLOG="$LOG" SPFT_BEAT=1 SPFT_POLL=1 FAKE_APT_SLOW=9 bash "$T/provision.sh" > "$T/out" 2>&1 &
+pid=$!
+scripts() { # how many processes run this very script (the loops are forks of it and have the same command line)
+  local p c n=0
+  for p in /proc/[0-9]*; do
+    c=$({ tr '\0' ' ' < "$p/cmdline"; } 2>/dev/null) || continue
+    case $c in "bash $T/provision.sh "*) n=$((n + 1)) ;; esac
+  done
+  echo "$n"
+}
+sleep 4
+before=$(scripts)
+{ kill -9 "$pid"; wait "$pid"; } 2>/dev/null
+sleep 3
+after=$(scripts)
+echo "processes of the script: $before while it ran, $after three seconds after it was killed"
+[ "$before" -ge 2 ] && ok "while it runs there is the script and its loop ($before)" || bad "expected the script and its loop, found $before"
+[ "$after" = 0 ] && ok "three seconds after the kill no loop is left" || bad "$after loop(s) went on running after the script was killed"
+for p in /proc/[0-9]*; do   # never leave a stray loop behind, whatever happened
+  c=$({ tr '\0' ' ' < "$p/cmdline"; } 2>/dev/null) || continue
+  case $c in "bash $T/provision.sh "*) kill -9 "${p#/proc/}" 2>/dev/null ;; esac
+done
+sleep 7   # the stand-in apt that was left running finishes by itself
 
 echo; echo "FAIL count: $fails"
 rm -rf "$T"; echo "cleaned up"

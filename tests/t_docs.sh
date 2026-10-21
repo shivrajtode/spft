@@ -180,6 +180,105 @@ for name, needle in (("Termux", "f-droid.org/packages/com.termux/"), ("Termux Gi
     else:
         bad("the README has no link for %s (%s)" % (name, needle))
 
+# --- what the docs say about the zoom, the stop command, the file windows and the settings must match the code -------------
+import subprocess
+
+def real_auto_zoom(size):
+    """The zoom that the real auto_zoom function of the spft script gives for 'WIDTHxHEIGHT' (None when it refuses)."""
+    mh = re.search(r"^X11_MIN_HEIGHT=(\d+)", spft, flags=re.M)
+    fn = re.search(r"^auto_zoom\(\) \{\n.*?\n\}\n", spft, flags=re.S | re.M)
+    if not (mh and fn):
+        return None
+    r = subprocess.run(["bash", "-c", "X11_MIN_HEIGHT=%s\n%s\nauto_zoom \"$1\"" % (mh.group(1), fn.group(0)), "bash", size],
+                       capture_output=True, text=True)
+    return int(r.stdout.strip()) if r.returncode == 0 and r.stdout.strip().isdigit() else None
+
+def tall(size, zoom):
+    w, h = (int(x) for x in size.split("x"))
+    return min(w, h) * 100 // zoom
+
+how = read("docs/HOW-IT-WORKS.md")
+trouble = read("docs/TROUBLESHOOTING.md")
+
+# the table of screens in HOW-IT-WORKS: every row is what the real function says
+sec = re.search(r"^## The zoom\n(.*?)^## ", how, flags=re.S | re.M)
+rows = re.findall(r"^\| ([0-9x]+(?: or [0-9x]+)?)[^|]*\| (\d+) \| (\d+) px tall \|$", sec.group(1) if sec else "", flags=re.M)
+wrong = []
+for sizes, zoom, height in rows:
+    for size in sizes.split(" or "):
+        z = real_auto_zoom(size)
+        if z != int(zoom) or tall(size, z or 1) != int(height):
+            wrong.append("%s: the page says zoom %s / %s px, the code gives %s / %s px" % (size, zoom, height, z, tall(size, z) if z else "?"))
+if len(rows) >= 4 and not wrong:
+    ok("the screen table in docs/HOW-IT-WORKS.md (%d rows) is what auto_zoom gives" % len(rows))
+else:
+    bad("the screen table in docs/HOW-IT-WORKS.md does not match auto_zoom (%d rows found): %s" % (len(rows), "; ".join(wrong)))
+
+# the README's sample `spft check` and its text use the same numbers
+m = re.search(r"^screen\s+: (\d+x\d+) pixels - spft x11 picks zoom (\d+)%, a Termux:X11 screen (\d+) pixels tall", readme, flags=re.M)
+if m and real_auto_zoom(m.group(1)) == int(m.group(2)) and tall(m.group(1), int(m.group(2))) == int(m.group(3)):
+    ok("the README's sample check has the screen row, and its numbers are what auto_zoom gives (%s: zoom %s)" % (m.group(1), m.group(2)))
+else:
+    bad("the README's sample check has no screen row, or its numbers are not what auto_zoom gives: %r" % (m.groups() if m else None))
+m = re.search(r"about (\d+)% on a (\d+x\d+) tablet, (\d+)% on a phone that is (\d+) pixels wide", readme)
+if m and real_auto_zoom(m.group(2)) == int(m.group(1)) and real_auto_zoom("%sx%d" % (m.group(4), int(m.group(4)) * 16 // 9)) == int(m.group(3)):
+    ok("the README's example zooms (%s%% and %s%%) are what auto_zoom gives" % (m.group(1), m.group(3)))
+else:
+    bad("the README's example zooms are not what auto_zoom gives: %r" % (m.groups() if m else None))
+help_zoom =re.search(r"a (\d+x\d+)\s+tablet gets (\d+), a phone that is (\d+) pixels wide\s+gets (\d+)", re.sub(r"\s+", " ", usage))
+if help_zoom and real_auto_zoom(help_zoom.group(1)) == int(help_zoom.group(2)) \
+        and real_auto_zoom("%sx%d" % (help_zoom.group(3), int(help_zoom.group(3)) * 16 // 9)) == int(help_zoom.group(4)):
+    ok("the examples in `spft help` (%s and %s) are what auto_zoom gives" % (help_zoom.group(2), help_zoom.group(4)))
+else:
+    bad("the zoom examples in `spft help` are not what auto_zoom gives: %r" % (help_zoom.groups() if help_zoom else None))
+
+# the file windows: the README sends people to sdcard, no longer to a folder called root
+if re.search(r"click \*\*root\*\*|in the list on the left click \*\*root\*\*", readme, flags=re.I):
+    bad("the README still tells people to click root in the file window")
+elif "Click **sdcard**" in readme and "SPFT_STORAGE=off" in readme and 'SPFT_STORAGE' in read("lib/run.sh"):
+    ok("the README sends people to sdcard in the file window, and names SPFT_STORAGE=off, which lib/run.sh reads")
+else:
+    bad("the README does not explain the sdcard home folder of the file windows (or lib/run.sh no longer reads SPFT_STORAGE)")
+
+# spft stop: what the help, the README and the code say it clears is the same list
+stop_help = re.sub(r"\s+", " ", usage)
+needs = ("force-stop everything", "Termux:X11 server", "clear the caches", "/tmp", "~/.cache", "cache", "memory cache")
+code_dirs = re.search(r'^  local dirs="\$X11_DATA/cache \$X11_DATA/code_cache \$X11_MEDIA/cache"', spft, flags=re.M) and \
+            '$R/tmp $R/root/.cache' in spft and "drop_caches" in spft and "am force-stop" in spft
+readme_stop = re.search(r"^\| `spft stop` \| \*\*Force-stop everything of spft:\*\*(.*?)\|$", readme, flags=re.M)
+miss = [n for n in needs if n not in stop_help] + [n for n in ("Debian's `/tmp`", "Termux:X11 server", "caches", "memory cache", "Never while it is flashing") if not readme_stop or n not in readme_stop.group(1)]
+if code_dirs and not miss:
+    ok("`spft stop` is described the same in `spft help` and the README, and the code clears those caches and force-stops the app")
+else:
+    bad("the description of `spft stop` (help, README) and the code do not agree: code=%s, missing=%s" % (bool(code_dirs), miss))
+if "## `spft stop`: everything, and the caches" in how and "Termux:X11 app" in how and "drop_caches" in how:
+    ok("docs/HOW-IT-WORKS.md has the section on `spft stop`")
+else:
+    bad("docs/HOW-IT-WORKS.md has no section on `spft stop` with its steps")
+
+# the settings that spft hands down to Debian are the ones that docs/HOW-IT-WORKS.md marks "(passed on)"
+dm = re.search(r'^DEBIAN_SETTINGS="([^"]*)"', spft, flags=re.M)
+passed = sorted(re.findall(r"^\| `([A-Z0-9_]+)` \| [^|]*\| \*\*\(passed on\)\*\*", how, flags=re.M))
+if dm and sorted(dm.group(1).split()) == passed:
+    ok("the settings that spft passes on to Debian (%s) are exactly the ones marked (passed on) in docs/HOW-IT-WORKS.md" % ", ".join(passed))
+else:
+    bad("DEBIAN_SETTINGS in spft (%r) and the (passed on) rows in docs/HOW-IT-WORKS.md (%r) differ" % (dm.group(1) if dm else None, passed))
+
+# every SPFT_ setting that the docs promise to work "in front of the command" is one that is passed on or read in Termux
+for name in ("SPFT_FAKE_KERNEL", "SPFT_STORAGE"):
+    if name in readme + trouble and name in (dm.group(1) if dm else ""):
+        ok("%s is in the docs, and spft passes it on" % name)
+    else:
+        bad("%s is in the docs but is not in DEBIAN_SETTINGS (typed in front of the command it would never arrive)" % name)
+
+# the harmless install warnings: README and troubleshooting say so, and provision.sh really prints the note for each
+prov = read("lib/provision.sh")
+for text in ("Exec format error", "systemctl: command not found", "Restarting systemd-binfmt failed"):
+    if text in readme and text in trouble and (text.split(":")[0] in prov):
+        ok('"%s": README and troubleshooting explain it as harmless, and provision.sh knows it' % text)
+    else:
+        bad('"%s": missing from the README, the troubleshooting page, or provision.sh' % text)
+
 print()
 print("FAIL count: %d" % fails)
 sys.exit(1 if fails else 0)

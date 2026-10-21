@@ -53,6 +53,7 @@ cat > "$T/bin/box64" <<'EOF'
 echo "BOX64 args=[$*] DISPLAY=$DISPLAY NOMITSHM=$QT_X11_NO_MITSHM QTPLUG=${QT_PLUGIN_PATH:-unset}"
 echo "BOX64 libpath=$BOX64_LD_LIBRARY_PATH"
 echo "BOX64 preload=${BOX64_LD_PRELOAD:-unset}"
+[ -z "${STUB_HOME:-}" ] || echo "BOX64 home=$HOME xdgconf=${XDG_CONFIG_HOME:-unset} xdgcache=${XDG_CACHE_HOME:-unset} xdgdata=${XDG_DATA_HOME:-unset}"
 EOF
 # uname -r says what FAKE_UNAME_R says (the kernel of the phone)
 cat > "$T/bin/uname" <<'EOF'
@@ -79,10 +80,13 @@ sed -e "s#/opt#$T/opt#g" \
     -e "s#/tmp/runtime-root#$T/rt#g" \
     -e "s#/tmp/spft-fake-kernel#$T/fake-kernel#g" \
     -e "s#/tmp/spft-kernelfix\.so#$T/kernelfix.so#g" \
+    -e "s#store=/sdcard;#store=$T/sdcard;#" \
     -e "s#/etc/xdg/openbox#$T/etc-openbox#g" "$REPO/lib/run.sh" > "$T/spft-run"
 if grep -n '/tmp/\|/opt\|/etc/' "$T/spft-run" | grep -v "$T"; then echo "NOTE: unreplaced fixed paths above"; fi
+if grep -n 'store=/sdcard' "$T/spft-run"; then echo "NOTE: the /sdcard folder was not moved into the work folder"; fi
 
-run() { env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T/home" "$@" bash "$T/spft-run"; }
+# SPFT_STORAGE=off unless a test says otherwise: the first sections are about other things than the home folder
+run() { env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T/home" SPFT_STORAGE=off "$@" bash "$T/spft-run"; }
 sock_up() { python3 -c 'import socket,sys,time; s=socket.socket(socket.AF_UNIX); s.bind(sys.argv[1]); time.sleep(40)' "$T/X0" & SOCKPID=$!; sleep 1; }
 sock_down() { kill "$SOCKPID" 2>/dev/null; rm -f "$T/X0"; }
 
@@ -214,6 +218,34 @@ run SPFT_DISPLAY=vnc SPFT_LIBDIR="$REPO/lib" FAKE_UNAME_R=4.19.139 BOX64_LD_PREL
 echo; echo "=== 23. the kernel-fix files are not there (an old Debian setup): the tool simply starts"
 mkdir -p "$T/emptylib"
 run SPFT_DISPLAY=vnc SPFT_LIBDIR="$T/emptylib" FAKE_UNAME_R=4.19.127 | grep -E '^kernel|preload=|BOX64 args' | sed "s#$T#\$T#g"
+
+echo; echo "=== 24. the tool starts with the phone's internal storage as its home folder, so that its file windows open there"
+rm -rf "$T/opt"; mkdir -p "$T/opt/v5" "$T/storage"; : > "$T/opt/v5/flash_tool"
+run SPFT_DISPLAY=vnc SPFT_STORAGE="$T/storage" STUB_HOME=1 | grep -E '^file windows|BOX64 home=' | sed "s#$T#\$T#g"
+echo "--- the tool's own settings and caches stay where they were (Debian's /root, here $T/home): the XDG folders above say so"
+
+echo; echo "=== 25. SPFT_STORAGE=auto is /sdcard (a stand-in folder here); when that is not there, home stays as it is"
+mkdir -p "$T/sdcard"
+run SPFT_DISPLAY=vnc SPFT_STORAGE=auto STUB_HOME=1 | grep -E '^file windows|^\(the folder|BOX64 home=' | sed "s#$T#\$T#g"
+echo "--- not there:"
+rmdir "$T/sdcard"
+run SPFT_DISPLAY=vnc SPFT_STORAGE=auto STUB_HOME=1 | grep -E '^file windows|^\(the folder|BOX64 home=' | sed "s#$T#\$T#g"
+echo "--- a folder that was asked for by name and is not there:"
+run SPFT_DISPLAY=vnc SPFT_STORAGE="$T/no-such-folder" STUB_HOME=1 | grep -E '^file windows|^\(the folder|BOX64 home=' | sed "s#$T#\$T#g"
+
+echo; echo "=== 26. SPFT_STORAGE=off: home stays, and no XDG folder is set"
+run SPFT_DISPLAY=vnc SPFT_STORAGE=off STUB_HOME=1 | grep -E '^file windows|^\(the folder|BOX64 home=' | sed "s#$T#\$T#g"
+
+echo; echo "=== 27. an XDG folder that is set already is kept as it is"
+run SPFT_DISPLAY=vnc SPFT_STORAGE="$T/storage" STUB_HOME=1 XDG_CONFIG_HOME=/my/conf | grep -E 'BOX64 home=' | sed "s#$T#\$T#g"
+
+echo; echo "=== 28. only the tool gets the new home: openbox's rc.xml is still made in Debian's own home, and nothing is written to the storage"
+sock_up
+rm -f "$T/openbox.log" "$T/openbox-reconf.log" "$T/ob.pid" "$T/home/.config/openbox/rc.xml"
+run SPFT_DISPLAY=x11 SPFT_STORAGE="$T/storage" STUB_HOME=1 | grep -E 'BOX64 home=' | sed "s#$T#\$T#g"
+if [ -f "$T/home/.config/openbox/rc.xml" ]; then echo "ok: rc.xml is in Debian's home"; else echo "FAIL: rc.xml was not made in Debian's home"; fi
+if [ -n "$(ls -A "$T/storage")" ]; then echo "FAIL: spft-run wrote into the storage folder: $(ls -A "$T/storage")"; else echo "ok: the storage folder is untouched"; fi
+sock_down
 
 pkill -f "sleep 25" 2>/dev/null
 if grep -qF "$T" /proc/mounts; then echo "mounts under $T - not deleting"; else rm -rf "$T"; echo "cleaned up"; fi

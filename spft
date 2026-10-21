@@ -43,15 +43,19 @@ usage() {
 spft - SP Flash Tool on a rooted phone or tablet (Termux + Debian chroot + box64 + Termux:X11)
 
   spft                      start SP Flash Tool (the same as: spft x11)
-  spft x11 [options]        start it on Termux:X11. The screen is turned to landscape, fullscreen, 150% zoom.
+  spft x11 [options]        start it on Termux:X11. The screen is turned to landscape and fullscreen, and zoomed as
+                            far as the whole tool window still fits on it (the tool is about 720 pixels tall)
         reverse               landscape the other way up (when the picture is upside down)
         portrait | auto       do not force landscape (zoom is then 100)
-        zoom=170              size in percent (default 150; above about 160 the tool is taller than the screen)
+        zoom=N                size in percent. The default, zoom=auto, picks the biggest that fits: a 1280x800
+                              tablet gets 105, a phone that is 1080 pixels wide gets 145. More cuts off the bottom.
         keys                  keep Termux:X11's extra-keys bar (hidden by default, to make room)
         plain                 leave the Termux:X11 settings alone
         reset                 put the Termux:X11 settings back as they were before spft changed them
   spft vnc                  start it on a VNC desktop instead (viewer app -> localhost:5901, password spft1234)
-  spft stop                 close SP Flash Tool and the Termux:X11 server (never while it is flashing)
+  spft stop                 force-stop everything of spft: SP Flash Tool and every other program in Debian, the
+                            Termux:X11 server and app. Then unmount Debian and clear the caches (Debian's /tmp and
+                            ~/.cache, the Termux:X11 app's cache, the phone's memory cache). Never while it is flashing.
   spft tool [FILE|URL|NAME] install or change SP Flash Tool. Without an argument it uses the Linux zip from your
                             Download folder if there is one, and downloads it otherwise.
                             `spft tool list` shows the versions it knows.
@@ -63,8 +67,9 @@ spft - SP Flash Tool on a rooted phone or tablet (Termux + Debian chroot + box64
   spft uninstall [--yes]    delete the Debian system and the downloads (asks first, and refuses while anything
                             is still mounted - the Debian folder has your phone's /dev and storage mounted inside)
 
-Inside Debian the phone's internal storage is /sdcard. In the tool's file dialogs type, for example,
-/sdcard/Download in the "File name" box and press Enter.
+Inside Debian the phone's internal storage is /sdcard, and the tool's file windows start there (the side bar
+shows "sdcard" instead of "root"). To open your Download folder, type /sdcard/Download in the "File name" box
+and press Enter. SPFT_STORAGE=off spft  leaves the file windows in Debian's own home folder instead.
 
 Made by Shivraj - Telegram @Shivraj_editx - GitHub shivrajtode
 EOF
@@ -133,11 +138,31 @@ prep_app() {
   fi
 }
 root_env() { printf 'LD_LIBRARY_PATH=%s SPFT_ROOT=%s SPFT_SUITE=%s SPFT_DL=%s' "$PREFIX/lib" "$R" "$SUITE" "$DL"; }
-root_args() { if [ $# -gt 0 ]; then printf '%q ' "$@"; fi; }
+# sq WORD   the word in single quotes, so that every POSIX shell reads it back unchanged (also with spaces, quotes, newlines or
+# letters outside ASCII). Not printf %q: that writes some of those as $'...', which not every shell understands.
+sq() { local s=$1; printf "'%s'" "${s//\'/\'\\\'\'}"; }
+root_args() { local a; for a in "$@"; do printf '%s ' "$(sq "$a")"; done; }
 # as_root ARGS...   run this script as root with ARGS, and do not come back (the root step replaces this one)
 as_root() { prep_app; exec su -c "$(root_env) $PREFIX/bin/bash $DL/app/spft $(root_args "$@")"; }
 # root_call ARGS...   the same, but come back with its exit status
 root_call() { prep_app; su -c "$(root_env) $PREFIX/bin/bash $DL/app/spft $(root_args "$@")"; }
+
+# Settings for the programs inside Debian (the table of settings in docs/HOW-IT-WORKS.md). Typed in front of the command in
+# Termux, for example  SPFT_STORAGE=off spft,  they would never get there: su does not have to pass the environment on, and
+# `enter` starts the shell in Debian with `env -i`, which throws all of it away. So the ones that are set travel inside the
+# command line itself, as VAR='value' words (the line is read once more by the shell in Debian, hence the quotes).
+# Before v4 this was missing: SPFT_FAKE_KERNEL=off spft, which spft itself recommends, had no effect.
+DEBIAN_SETTINGS="SPFT_FAKE_KERNEL SPFT_STORAGE SPFT_GEOMETRY BOX64_LOG"
+DSET=()   # filled by debian_settings
+debian_settings() {
+  local v val
+  DSET=()
+  for v in $DEBIAN_SETTINGS; do
+    val=${!v:-}
+    if [ -z "$val" ]; then continue; fi
+    DSET+=("$v=$(sq "$val")")
+  done
+}
 
 wake_lock() { if command -v termux-wake-lock >/dev/null 2>&1; then termux-wake-lock >/dev/null 2>&1 || true; fi; }
 wake_unlock() { if command -v termux-wake-unlock >/dev/null 2>&1; then termux-wake-unlock >/dev/null 2>&1 || true; fi; }
@@ -180,6 +205,9 @@ app_installed() {
 
 is_mounted() { grep -qF " $1 " /proc/mounts; }
 
+# What `enter` mounts into Debian, deepest first for the unmounting (dev/pts and dev/shm sit inside dev)
+MOUNT_DIRS="tmp/.X11-unix mnt/sdcard dev/shm dev/pts dev proc sys"
+
 bind() { # bind SRC DST  (skipped when SRC does not exist)
   [ -d "$1" ] || return 0
   mkdir -p "$2"
@@ -204,8 +232,8 @@ mounts() {
 write_helpers() {
   need_lib
   mkdir -p "$R/usr/local/bin" "$R/root"
-  # shortcuts for the tool's file dialogs: /sdcard works like on Android; "root" in the sidebar also shows
-  # sdcard and Download
+  # shortcuts for the tool's file dialogs: /sdcard works like on Android (spft-run starts the tool with that as its home
+  # folder); with SPFT_STORAGE=off the home folder is /root, and there sdcard and Download are links to the same places
   ln -sfn /mnt/sdcard "$R/sdcard"
   ln -sfn /mnt/sdcard "$R/root/sdcard"
   ln -sfn /mnt/sdcard/Download "$R/root/Download"
@@ -235,10 +263,13 @@ chroot_pids() { # the PID of every process whose root folder is the Debian folde
   done
 }
 
+KILLED=0   # how many processes kill_chroot found
+
 kill_chroot() { # stop everything that runs inside Debian (the tool, openbox, the VNC server ...)
   local pids n
   pids=$(chroot_pids)
   n=$(printf '%s\n' "$pids" | grep -c .) || true
+  KILLED=$n
   if [ -n "$pids" ]; then
     # shellcheck disable=SC2086
     kill $pids 2>/dev/null || true
@@ -250,15 +281,11 @@ kill_chroot() { # stop everything that runs inside Debian (the tool, openbox, th
   echo "stopped $n process(es) that were running inside Debian"
 }
 
-root_stop() {
-  unset LD_LIBRARY_PATH LD_PRELOAD
-  kill_chroot
-}
-
 root_umount() {
   unset LD_LIBRARY_PATH LD_PRELOAD
   kill_chroot
-  for d in tmp/.X11-unix mnt/sdcard dev/shm dev/pts dev proc sys; do
+  # shellcheck disable=SC2086
+  for d in $MOUNT_DIRS; do
     if is_mounted "$R/$d"; then
       /system/bin/umount "$R/$d" || echo "spft: could not unmount $R/$d (busy?)" >&2
     fi
@@ -540,7 +567,7 @@ cmd_tool() { # cmd_tool [list|--if-missing|FILE.zip|URL|NAME]
 
 root_check() {
   unset LD_LIBRARY_PATH LD_PRELOAD
-  local free sdk rel abis where krel need blockers='' limits=''
+  local free sdk rel abis where krel need scr short z blockers='' limits=''
   # blocker  = spft cannot run on this device at all;  limit = it runs, but something will not work
   blocker() { blockers="$blockers - $1"$'\n'; }
   limit() { limits="$limits - $1"$'\n'; }
@@ -587,6 +614,15 @@ root_check() {
     elif [ "$free" -lt 3000 ]; then
       limit "$free MB are free on /data: tight, the install needs about 3000"
     fi
+  fi
+  # the screen: the tool's window is about 720 pixels tall, and spft x11 picks the zoom that keeps it whole on screen
+  scr=$(root_screen_size) || scr=
+  if z=$(auto_zoom "$scr" 2>/dev/null); then
+    short=${scr%%x*}
+    if [ "${scr#*x}" -lt "$short" ]; then short=${scr#*x}; fi
+    row screen "$scr pixels - spft x11 picks zoom $z%, a Termux:X11 screen $((short * 100 / z)) pixels tall (the tool's window needs about 720)"
+  else
+    row screen "could not read the size (wm size) - spft x11 then uses zoom 150. If the bottom of the tool window is cut off: spft x11 zoom=110"
   fi
   if [ -x "$R/bin/bash" ]; then row debian "installed in $R"; else row debian "not installed yet (spft install does that)"; fi
   if [ -x "$R/usr/local/bin/box64" ] || [ -x "$R/usr/bin/box64" ]; then row box64 "installed"; else row box64 "not installed yet (spft install does that)"; fi
@@ -725,7 +761,8 @@ cmd_install() { # cmd_install [--no-tool]
   [ "$(wc -c < "$DL/rootfs.tar.gz")" -gt 10000000 ] ||
     die "$DL/rootfs.tar.gz is too small to be a rootfs - delete it, or set SPFT_URL to a Debian arm64 rootfs tarball"
   say "setting up Debian: box64, libraries, desktop (15-30 minutes the first time)"
-  echo "   Four steps follow. Downloads show a counter (MB and files), and a line appears every 20 seconds while a step is busy."
+  echo "   Four steps follow. A moving bar shows that apt is checking, downloads show a counter (MB and files), the installing"
+  echo "   shows a counter, and a line appears every 20 seconds while a step is busy."
   echo "   The longest is '[2/4] arm64 + x86_64 libraries'. It is working, not stuck, even when it takes minutes."
   local rc=0
   root_call root-install "$DL/rootfs.tar.gz" || rc=$?
@@ -872,6 +909,50 @@ x11_reset() { # put the settings back as x11_save found them
   fi
 }
 
+# --- the zoom: as big as the tool's window still fits ----------------------------------------------------------
+# The tool's main window is about 720 pixels tall, and it cannot be made shorter: on a Termux:X11 screen that is shorter
+# its bottom row is cut off. In landscape that screen is as tall as the SHORT side of the phone divided by the zoom, so the
+# biggest zoom that still fits is  short side * 100 / 720.  X11_MIN_HEIGHT keeps a little room (the window frame takes
+# some). 1280x800 tablet: zoom 105, a screen of 761 pixels. Phone 1080 wide: zoom 145, 744 pixels.
+X11_MIN_HEIGHT=740
+
+# auto_zoom WIDTHxHEIGHT   the biggest zoom, in steps of 5 and between 30 and 300, that keeps the screen X11_MIN_HEIGHT tall
+auto_zoom() {
+  local w=${1%%x*} h=${1#*x} short z
+  case $w$h in '' | *[!0-9]*) return 1 ;; esac
+  short=$w
+  if [ "$h" -lt "$w" ]; then short=$h; fi
+  z=$((short * 100 / X11_MIN_HEIGHT / 5 * 5))
+  if [ "$z" -lt 30 ]; then z=30; fi
+  if [ "$z" -gt 300 ]; then z=300; fi
+  echo "$z"
+}
+
+# root_screen_size   the phone's screen in pixels, like 1280x800: what `wm size` says is the size now (Override size if it
+# was changed, Physical size otherwise). Exit status 1 when it can't be told.
+root_screen_size() {
+  unset LD_LIBRARY_PATH LD_PRELOAD
+  local out s
+  out=$(/system/bin/wm size 2>/dev/null) || return 1
+  s=$(printf '%s\n' "$out" | sed -n 's/^Override size: *\([0-9][0-9]*x[0-9][0-9]*\).*/\1/p' | head -n 1)
+  [ -n "$s" ] || s=$(printf '%s\n' "$out" | sed -n 's/^Physical size: *\([0-9][0-9]*x[0-9][0-9]*\).*/\1/p' | head -n 1)
+  [ -n "$s" ] || return 1
+  printf '%s\n' "$s"
+}
+
+# pick_zoom   prints the zoom for this screen (what to do when the user gave none). Its messages go to stderr.
+pick_zoom() {
+  local size z
+  size=$(root_call root-screen-size 2>/dev/null | tail -n 1) || size=
+  if z=$(auto_zoom "$size" 2>/dev/null); then
+    echo ">> screen $size: zoom $z% keeps the whole tool window on it (choose your own with: spft x11 zoom=N)" >&2
+    echo "$z"
+  else
+    echo ">> could not read the screen size, so zoom 150 is used. If the bottom of the tool window is cut off, run: spft x11 zoom=110" >&2
+    echo 150
+  fi
+}
+
 cmd_x11() { # cmd_x11 [options]: Termux:X11 server and app as the normal Termux user, then the tool inside Debian
   ! is_root || die "run spft from Termux as a normal user (it calls su itself)"
   local orient=landscape zoom='' zgiven=0 keys=false action=layout a
@@ -886,13 +967,15 @@ cmd_x11() { # cmd_x11 [options]: Termux:X11 server and app as the normal Termux 
       *) die "x11: unknown option '$a'  (options: reverse portrait auto zoom=N keys plain reset)" ;;
     esac
   done
-  if [ "$zgiven" = 0 ]; then    # the tool is wider than a portrait screen, so it only gets zoomed in landscape
-    case $orient in portrait | auto) zoom=100 ;; *) zoom=150 ;; esac
+  if [ "$zgiven" = 0 ]; then zoom=auto; fi
+  # the tool is wider than a portrait screen, so it only gets zoomed in landscape
+  case $orient in portrait | auto) if [ "$zoom" = auto ]; then zoom=100; fi ;; esac
+  if [ "$zoom" != auto ]; then
+    case $zoom in '' | *[!0-9]*) die "x11: zoom=N needs a whole number (or the word auto), for example zoom=150" ;; esac
+    [ "${#zoom}" -le 3 ] || die "x11: zoom must be between 30 and 300"
+    zoom=$((10#$zoom))
+    if [ "$zoom" -lt 30 ] || [ "$zoom" -gt 300 ]; then die "x11: zoom must be between 30 and 300"; fi
   fi
-  case $zoom in '' | *[!0-9]*) die "x11: zoom=N needs a whole number, for example zoom=150" ;; esac
-  [ "${#zoom}" -le 3 ] || die "x11: zoom must be between 30 and 300"
-  zoom=$((10#$zoom))
-  if [ "$zoom" -lt 30 ] || [ "$zoom" -gt 300 ]; then die "x11: zoom must be between 30 and 300"; fi
   need_su
   command -v termux-x11 >/dev/null 2>&1 ||
     die "termux-x11 is not installed. In Termux run:  pkg install x11-repo  and then  pkg install termux-x11-nightly
@@ -916,54 +999,212 @@ cmd_x11() { # cmd_x11 [options]: Termux:X11 server and app as the normal Termux 
     fi
   fi
   x11_open
-  if [ "$action" = layout ]; then x11_layout "$orient" "$zoom" "$keys"; fi
+  if [ "$action" = layout ]; then
+    if [ "$zoom" = auto ]; then zoom=$(pick_zoom); fi
+    x11_layout "$orient" "$zoom" "$keys"
+  fi
   wake_lock    # keeps the CPU awake while the tool runs: a phone that falls asleep in the middle of a flash can ruin it
-  as_root enter SPFT_DISPLAY=x11 spft-run
+  debian_settings
+  as_root enter SPFT_DISPLAY=x11 ${DSET[@]+"${DSET[@]}"} spft-run
 }
 
 cmd_vnc() {
   ! is_root || die "run spft from Termux as a normal user (it calls su itself)"
   need_su
   wake_lock
-  as_root enter SPFT_DISPLAY=vnc spft-run
+  debian_settings
+  as_root enter SPFT_DISPLAY=vnc ${DSET[@]+"${DSET[@]}"} spft-run
 }
 
+# --- stop: everything of spft, and the caches ------------------------------------------------------------------
+# `spft stop` ends every part of spft, then clears what they leave behind. Two phases, like the other commands: the normal
+# Termux user (cmd_stop) calls the root step (root_stop), which can see and end every process, and then clears up whatever
+# is left on the Termux side.
+#   ended:    every program that runs inside Debian (SP Flash Tool, box64, openbox, the VNC server, shells),
+#             the Termux:X11 server, the Termux:X11 app (force-stopped)
+#   unmounted: what `enter` mounted into Debian
+#   cleared:  Debian's /tmp (sockets, logs, the kernel-fix library) and ~/.cache, the Termux:X11 app's cache folders,
+#             and the kernel's memory cache for files
+#   NOT touched: the tool and its own settings and logs, your files, Debian's packages, apt's downloads (an interrupted
+#             install carries on from them), the Termux:X11 settings (`spft x11 reset` puts those back)
+
+X11_PKG=com.termux.x11                              # the Termux:X11 app
+X11_DATA=/data/data/$X11_PKG                        # its private data (the caches in it)
+X11_MEDIA=/data/media/0/Android/data/$X11_PKG       # its cache folder on the shared storage
+X11_KILLED=0                                        # how many server processes x11_server_kill found
+
 # The Termux:X11 server renames its process "termux-x11 <app id> :0" (its README: "pkill -f termux-x11"). Prints the PID
-# of every one of them that this Termux user can see.
+# of every one of them that can be seen (the normal Termux user sees its own, root sees all).
 x11_server_pids() {
   local p c
   for p in /proc/[0-9]*; do
-    c=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null) || continue
+    c=$({ tr '\0' ' ' < "$p/cmdline"; } 2>/dev/null) || continue
     case $c in *"termux-x11 "*) echo "${p#/proc/}" ;; esac
   done
   return 0
 }
 
-# Stop the Termux:X11 server, so that the next `spft` starts a fresh one, and remove the socket file that a server
-# which was killed (by Android, say) leaves behind: with that file in the way spft thinks a server is running and the
-# screen stays black.
-x11_server_stop() {
-  local pids sock=$PREFIX/tmp/.X11-unix/X0
+# Ends the Termux:X11 server: TERM first, then KILL for one that does not go. X11_KILLED is how many there were.
+x11_server_kill() {
+  local pids
+  pids=$(x11_server_pids)
+  X11_KILLED=$(printf '%s\n' "$pids" | grep -c .) || true
+  [ -n "$pids" ] || return 0
+  # shellcheck disable=SC2086
+  kill $pids 2>/dev/null || true
+  sleep 1
   pids=$(x11_server_pids)
   if [ -n "$pids" ]; then
     # shellcheck disable=SC2086
-    kill $pids 2>/dev/null || true
+    kill -9 $pids 2>/dev/null || true
     sleep 1
-    echo "stopped the Termux:X11 server"
-  fi
-  if [ -S "$sock" ]; then
-    rm -f "$sock"
-    if [ -z "$pids" ]; then echo "removed an old Termux:X11 socket (no server was running)"; fi
   fi
   return 0
 }
 
+# Removes what a Termux:X11 server leaves behind in Termux's tmp folder: the socket file and the lock file. A server that was
+# killed (by Android, say) leaves them, and with the socket in the way spft thinks a server is running and the screen stays
+# black. Call it only when no server runs. Prints what it removed.
+x11_server_clean() {
+  local f n=0
+  for f in "$PREFIX/tmp/.X11-unix/X0" "$PREFIX/tmp/.X0-lock"; do
+    if [ -e "$f" ] || [ -L "$f" ]; then rm -f "$f" && n=$((n + 1)); fi
+  done
+  X11_CLEANED=$n
+  return 0
+}
+X11_CLEANED=0
+
+# Unmounts what `enter` mounted into Debian, quietly. Exit status 1 when something is still mounted afterwards.
+unmount_all() {
+  local d round
+  for round in 1 2; do    # the second round is for a mount that was still busy during the first
+    # shellcheck disable=SC2086
+    for d in $MOUNT_DIRS; do
+      if is_mounted "$R/$d"; then /system/bin/umount "$R/$d" >/dev/null 2>&1 || true; fi
+    done
+    if ! grep -qF " $R" /proc/mounts; then return 0; fi
+    if [ "$round" = 1 ]; then sleep 1; fi
+  done
+  return 1
+}
+
+# size_kb DIR...   how many KB the folders hold together (a folder that is not there counts 0)
+size_kb() {
+  local d total=0 k
+  for d in "$@"; do
+    [ -d "$d" ] || continue
+    k=$(/system/bin/du -sk "$d" 2>/dev/null | { read -r k _ || true; echo "${k:-0}"; })
+    case $k in '' | *[!0-9]*) k=0 ;; esac
+    total=$((total + k))
+  done
+  echo "$total"
+}
+
+# clear_dir DIR   empty a folder and keep the folder. It refuses a path that is not at least three levels deep (never / or
+# /data), and it never goes into a mount point: a recursive delete through one would delete the phone's own files.
+clear_dir() {
+  local d=$1 e
+  case $d in /*/*/*) ;; *) return 1 ;; esac
+  [ -d "$d" ] || return 0
+  for e in "$d"/* "$d"/.[!.]* "$d"/..?*; do
+    if [ ! -e "$e" ] && [ ! -L "$e" ]; then continue; fi    # a pattern that matched nothing
+    if is_mounted "$e"; then continue; fi
+    /system/bin/rm -rf "$e" 2>/dev/null || true
+  done
+  return 0
+}
+
+# Empties the cache folders (see above) and prints one row about it.
+clean_caches() {
+  local dirs="$X11_DATA/cache $X11_DATA/code_cache $X11_MEDIA/cache" before after kb tenth d
+  local what="Debian's /tmp and ~/.cache, the Termux:X11 app's cache"
+  if grep -qF " $R" /proc/mounts; then
+    # a recursive delete must not get anywhere near a mount: Debian's own folders wait until nothing is mounted in it
+    what="the Termux:X11 app's cache only. Debian's own folders were left alone: something is still mounted in it"
+  else
+    dirs="$R/tmp $R/root/.cache $dirs"
+  fi
+  # shellcheck disable=SC2086
+  before=$(size_kb $dirs)
+  # shellcheck disable=SC2086
+  for d in $dirs; do clear_dir "$d" || true; done
+  # shellcheck disable=SC2086
+  after=$(size_kb $dirs)
+  kb=$((before - after))
+  if [ "$kb" -lt 0 ]; then kb=0; fi
+  tenth=$((kb * 10 / 1024))
+  row cache "cleared, $((tenth / 10)).$((tenth % 10)) MB freed ($what)"
+}
+
+# The kernel keeps the files it read lately in memory; this gives that memory back (it is what "clear the cache" means for RAM).
+drop_memory_cache() {
+  /system/bin/sync >/dev/null 2>&1 || true
+  { echo 3 > /proc/sys/vm/drop_caches; } 2>/dev/null
+}
+
+# The root step of `spft stop`.
+root_stop() {
+  unset LD_LIBRARY_PATH LD_PRELOAD
+  echo "== stopping everything of spft =="
+  kill_chroot > /dev/null
+  if [ "$KILLED" -gt 0 ]; then
+    row debian "stopped $KILLED process(es): SP Flash Tool, box64, openbox and everything else that ran inside Debian"
+  else
+    row debian "nothing was running inside Debian"
+  fi
+  x11_server_kill
+  x11_server_clean
+  if [ "$X11_KILLED" -gt 0 ]; then
+    row x11-server "stopped the Termux:X11 server"
+  elif [ "$X11_CLEANED" -gt 0 ]; then
+    row x11-server "no server was running; removed the file that an old one left behind"
+  else
+    row x11-server "no server was running"
+  fi
+  if /system/bin/am force-stop "$X11_PKG" > /dev/null 2>&1; then
+    row x11-app "the Termux:X11 app is force-stopped"
+  else
+    row x11-app "could not force-stop the Termux:X11 app - close it by hand if it is still open"
+  fi
+  if unmount_all; then
+    row mounts "all unmounted (Debian is no longer linked to the phone's /dev, /proc, /sys and storage)"
+  else
+    row mounts "WARNING: still mounted (busy?) - $(grep -F " $R" /proc/mounts | cut -d' ' -f2 | tr '\n' ' ')"
+  fi
+  clean_caches
+  if drop_memory_cache; then
+    row memory "the phone's file cache was dropped, so more RAM is free"
+  else
+    row memory "the kernel does not allow dropping its file cache here (harmless)"
+  fi
+}
+
+# For the normal Termux user: the root step, then what is left on the Termux side. (After a server that was killed by
+# Android there is only a leftover socket file; after root_stop there is nothing left to do, and it stays silent.)
+x11_server_stop() {
+  x11_server_kill
+  x11_server_clean
+  if [ "$X11_KILLED" -gt 0 ]; then echo "stopped the Termux:X11 server"; fi
+  if [ "$X11_CLEANED" -gt 0 ] && [ "$X11_KILLED" -eq 0 ]; then echo "removed an old Termux:X11 socket (no server was running)"; fi
+  return 0
+}
+
 cmd_stop() {
+  local rc=0
   if is_root; then root_stop; return 0; fi
   need_su
-  root_call stop || true
+  root_call stop || rc=$?
   x11_server_stop
   wake_unlock
+  if [ "$rc" -ne 0 ]; then
+    echo "spft: the root step of stop did not finish (exit status $rc), so something may still be running." >&2
+    echo "      Run  spft stop  again, or restart the phone." >&2
+    return 1
+  fi
+  if command -v termux-wake-unlock >/dev/null 2>&1; then row wakelock "released, the phone may sleep again"; fi
+  echo
+  echo "All of spft is stopped. Start it again with:  spft"
 }
 
 cmd_uninstall() { # cmd_uninstall [--yes]
@@ -1014,5 +1255,6 @@ case "${1:-}" in
   root-tool) root_tool "${2:?zip path missing}" ;;
   root-tool-where) root_tool_where ;;
   root-find-zip) root_find_zip "${2:?name missing}" ;;
+  root-screen-size) root_screen_size ;;
   *) usage >&2; exit 1 ;;
 esac

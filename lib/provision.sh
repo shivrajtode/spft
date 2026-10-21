@@ -2,9 +2,9 @@
 # Runs INSIDE the Debian chroot, as root.
 # Installs box64, x86_64 libraries and a VNC desktop so SP Flash Tool v5 can run.
 #
-# It shows what it is doing all the time. The slow parts count their files and print a "still working" line,
-# because a step that stays quiet for a few minutes looks like a hang (and apt IS quiet while it reads its package
-# lists, and while dpkg unpacks, on a slow tablet).
+# It shows what it is doing all the time. The slow parts count their files, and a step that has nothing to count (apt
+# checking what is missing) shows a moving bar, because a step that stays quiet for a minute looks like a hang (and apt
+# IS quiet while it reads its package lists, and while dpkg unpacks, on a slow tablet).
 set -eu
 export DEBIAN_FRONTEND=noninteractive
 export LANG=C.UTF-8
@@ -12,8 +12,9 @@ export LANG=C.UTF-8
 STEPS=4
 STEP=starting
 n=0
-BEAT=${SPFT_BEAT:-20}   # seconds between "still working" lines
-POLL=${SPFT_POLL:-5}    # seconds between download progress lines
+BEAT=${SPFT_BEAT:-20}     # seconds between "still working" lines
+POLL=${SPFT_POLL:-5}      # seconds between download progress lines (and between the lines that stand in for the bar)
+FRAME=${SPFT_FRAME:-0.3}  # seconds between two pictures of the moving bar
 ARCHIVES=/var/cache/apt/archives
 
 say() { printf '\n>> %s\n' "$*"; }
@@ -26,16 +27,72 @@ trap 'rc=$?; if [ "$rc" != 0 ]; then printf "\n!! The setup stopped in step: %s 
 secs() { local s=$((SECONDS - $1)); printf '%dm%02ds' $((s / 60)) $((s % 60)); }
 mb() { awk -v b="$1" 'BEGIN { printf "%.1f", b / 1000000 }'; }   # bytes -> MB, the way apt counts (1 MB = 1,000,000 bytes)
 
+# The little loops that print while a command runs in front. If this script is stopped (Ctrl+C, a kill) the loops would
+# go on printing forever: a background job of a script ignores Ctrl+C. So each one looks, after every sleep, whether the
+# script is still there (`kill -0 $$`: $$ is the script's PID, also inside a subshell) and ends when it is not.
+
 # beat WHAT COMMAND...   run COMMAND; while it runs, print "... WHAT: still working (1m20s)" every $BEAT seconds. The exit
 # status is the command's. (Pass programs, or functions that handle their own errors: `set -e` is off inside a function
 # that is called like this.)
 beat() {
   local what=$1 t0=$SECONDS hb rc=0
   shift
-  ( while :; do sleep "$BEAT" >/dev/null 2>&1 || exit 0; echo "   ... $what: still working ($(secs "$t0"))"; done ) &
+  ( while :; do
+      sleep "$BEAT" >/dev/null 2>&1 || exit 0
+      kill -0 "$$" 2>/dev/null || exit 0
+      echo "   ... $what: still working ($(secs "$t0"))"
+    done ) &
   hb=$!
   "$@" || rc=$?
   { kill "$hb" && wait "$hb"; } 2>/dev/null || true
+  return "$rc"
+}
+
+# bar WHAT COMMAND...   for a step that prints nothing while it works and can take a minute (apt checking what is missing).
+# On a terminal a small bar moves and the time counts, all on one line, and ends as a full bar:
+#     [      =====         ] 0m12s
+#     [====================] 0m23s - done
+# Where the output goes to a file or a pipe (no terminal to draw over), a "still working" line comes every $POLL seconds
+# instead. The exit status is the command's. COMMAND must not print anything itself, that would land in the middle of the
+# bar: it keeps its messages in variables and the caller prints them afterwards.
+BARW=20      # width of the bar, in characters. The whole line stays under 40 characters: a phone held upright is about
+             # 45 wide, and a line that wraps cannot be drawn over again.
+bar_frame() { # bar_frame NUMBER TIME   one picture of the bar (a block of 5 going to and fro), drawn over the line it is on
+  local span=$((BARW - 5)) p
+  p=$(($1 % (2 * span)))
+  [ "$p" -le "$span" ] || p=$((2 * span - p))
+  printf '\r   [%*s=====%*s] %s ' "$p" '' $((span - p)) '' "$2"
+}
+bar() {
+  local what=$1 t0=$SECONDS hb rc=0 full
+  shift
+  if [ -t 1 ]; then
+    ( i=0
+      while :; do
+        bar_frame "$i" "$(secs "$t0")"
+        i=$((i + 1))
+        sleep "$FRAME" >/dev/null 2>&1 || exit 0
+        kill -0 "$$" 2>/dev/null || exit 0
+      done ) &
+    hb=$!
+    "$@" || rc=$?
+    { kill "$hb" && wait "$hb"; } 2>/dev/null || true
+    if [ "$rc" -eq 0 ]; then
+      full=$(printf '%*s' "$BARW" '' | tr ' ' '=')
+      printf '\r   [%s] %s - done\n' "$full" "$(secs "$t0")"
+    else
+      printf '\r%*s\r' $((BARW + 20)) ''     # nothing to show: wipe the bar, the caller says what went wrong
+    fi
+  else
+    ( while :; do
+        sleep "$POLL" >/dev/null 2>&1 || exit 0
+        kill -0 "$$" 2>/dev/null || exit 0
+        echo "   ... $what: still working ($(secs "$t0"))"
+      done ) &
+    hb=$!
+    "$@" || rc=$?
+    { kill "$hb" && wait "$hb"; } 2>/dev/null || true
+  fi
   return "$rc"
 }
 
@@ -47,8 +104,14 @@ apt_update() { beat "reading the package lists from the Debian servers" aptq upd
 # apt_plan [--skip-unknown] PACKAGE...   one dry run (not one per package: that is minutes on a slow tablet).
 # Sets PLAN_PKGS (the names to install), PLAN_N (how many packages that means) and PLAN_LIST/PLAN_FILES/PLAN_BYTES
 # (the files to download: "name size" lines, how many, how many bytes).
+# It prints nothing, because it runs under `bar` (see above). What it has to say stays in PLAN_ERR (apt's error message,
+# when it returns 1) and PLAN_NOTES (lines about skipped names); apt_install prints them.
+PLAN_ERR=
+PLAN_NOTES=
 apt_plan() {
   local skip=0 names out bad badline p keep tries=0
+  PLAN_ERR=
+  PLAN_NOTES=
   if [ "${1:-}" = --skip-unknown ]; then skip=1; shift; fi
   names=$*
   while :; do
@@ -57,17 +120,17 @@ apt_plan() {
     # names this Debian does not have: "E: Unable to locate package X" / "E: Package 'X' has no installation candidate"
     bad=$(printf '%s\n' "$out" | sed -n -e 's/^E: Unable to locate package \(.*\)$/\1/p' -e "s/^E: Package '\\([^']*\\)' has no installation candidate\$/\\1/p")
     tries=$((tries + 1))
-    if [ "$skip" = 0 ] || [ -z "$bad" ] || [ "$tries" -gt 5 ]; then printf '%s\n' "$out" >&2; return 1; fi
+    if [ "$skip" = 0 ] || [ -z "$bad" ] || [ "$tries" -gt 5 ]; then PLAN_ERR=$out; return 1; fi
     keep=
     badline=" $(printf '%s' "$bad" | tr '\n' ' ') "
     for p in $names; do
       case $badline in
-        *" $p "*) echo "   (this Debian does not have $p - skipped)" ;;
+        *" $p "*) PLAN_NOTES="$PLAN_NOTES   (this Debian does not have $p - skipped)"$'\n' ;;
         *) keep="$keep $p" ;;
       esac
     done
     names=$keep
-    [ -n "$names" ] || { echo "no package is left to install" >&2; return 1; }
+    [ -n "$names" ] || { PLAN_ERR="no package is left to install"; return 1; }
   done
   PLAN_PKGS=$names
   PLAN_N=$(printf '%s\n' "$out" | grep -c '^Inst ' || true)
@@ -101,7 +164,11 @@ apt_fetch() {
   local hb rc=0 t0=$SECONDS
   if [ "$PLAN_FILES" -eq 0 ]; then echo "   nothing to download (the files are in the cache already)"; return 0; fi
   echo "   downloading $PLAN_FILES files, $(mb "$PLAN_BYTES") MB. apt names each file below, and a progress line follows every $POLL seconds."
-  ( while :; do sleep "$POLL" >/dev/null 2>&1 || exit 0; fetch_progress; done ) &
+  ( while :; do
+      sleep "$POLL" >/dev/null 2>&1 || exit 0
+      kill -0 "$$" 2>/dev/null || exit 0
+      fetch_progress
+    done ) &
   hb=$!
   # shellcheck disable=SC2086
   aptq install -d $PLAN_PKGS || rc=$?
@@ -112,24 +179,53 @@ apt_fetch() {
 }
 
 # unpack and set up the downloaded packages, counting them
+#
+# Two kinds of warning always show up in here, and both are harmless. They are red or yellow and sound bad, so after the
+# lines the awk program adds a note that says what they are (once per kind, and only when they appeared):
+#   - "Exec format error": while installing an x86_64 library Debian runs a small x86_64 helper program of that library (a
+#     cache refresh). That cannot work before box64 is there, so it fails. The tool does not need what it would have made.
+#   - "systemctl: command not found" and "Restarting systemd-binfmt failed", from box64's own setup: this Debian has no
+#     systemd. box64 would only have registered itself so that x86_64 programs start by themselves; spft starts the tool as
+#     `box64 ./flash_tool`, which needs no registration.
 apt_setup() {
   local rc=0
   echo "   installing $PLAN_N packages: unpacking, then setting them up. No more downloading; the phone is busy, it is not stuck."
   # shellcheck disable=SC2086
   ( set -o pipefail
     aptq install $PLAN_PKGS 2>&1 | awk -v total="$PLAN_N" '
+      function notes() {
+        if (fmt == 1) {
+          print "   Note: the \"Exec format error\" lines above are harmless. Debian tried to run a small x86_64 helper program"
+          print "   of a library, and that cannot work before box64 is installed. The tool does not need what it would have made."
+          fmt = 2
+        }
+        if (bin == 1) {
+          print "   Note: \"systemctl: command not found\" and \"Restarting systemd-binfmt failed\" are harmless too. This Debian has"
+          print "   no systemd, so box64 could not register itself there. spft starts the tool with box64 directly: no registration needed."
+          bin = 2
+        }
+        fflush()
+      }
       /^\(Reading database/ { next }
+      /Exec format error/ { if (!fmt) fmt = 1; print; fflush(); next }
+      /systemctl|systemd-binfmt/ { if (!bin) bin = 1; print; fflush(); next }
+      { notes() }
       /^Unpacking /  { u++; printf "   [%d/%d] %s\n", u, total, $0; fflush(); next }
       /^Setting up / { s++; printf "   [%d/%d] %s\n", s, total, $0; fflush(); next }
-      { print; fflush() }' ) || rc=$?
+      { print; fflush() }
+      END { notes() }' ) || rc=$?
   return "$rc"
 }
 
-# apt_install [--skip-unknown] PACKAGE...   check the names, download (with progress), install (with a counter)
+# apt_install [--skip-unknown] PACKAGE...   check the names (a moving bar), download (with progress), install (with a counter)
 apt_install() {
   local t0=$SECONDS
-  echo "   checking what has to be installed (one quick check) ..."
-  apt_plan "$@" || return 1
+  echo "   checking what has to be installed (up to a minute on a slow tablet; the bar moves while it works) ..."
+  if ! bar "checking what has to be installed" apt_plan "$@"; then
+    printf '%s\n' "$PLAN_ERR" >&2
+    return 1
+  fi
+  printf '%s' "$PLAN_NOTES"
   if [ "$PLAN_N" -eq 0 ]; then echo "   everything is installed already"; return 0; fi
   echo "   $PLAN_N packages to install"
   apt_fetch || return 1
@@ -144,8 +240,14 @@ getent group aid_inet >/dev/null || groupadd -g 3003 aid_inet || true
 getent group aid_net_raw >/dev/null || groupadd -g 3004 aid_net_raw || true
 usermod -a -G aid_inet,aid_net_raw root || true
 
+# A setup that was stopped in the middle of an install (Ctrl+C, `spft stop`, the phone's battery) can leave dpkg half
+# way through a package, and then every apt command says "dpkg was interrupted". This puts that right, and finds nothing
+# to do (and prints nothing) when everything is in order.
+beat "making sure no package is left half installed" dpkg --configure -a || true
+
 step "base packages"
-echo "   About 100 packages. Every part shows its progress; when it is quiet, a \"still working\" line comes every $BEAT seconds."
+echo "   About 100 packages. Every part shows its progress: a moving bar while apt checks, a counter for the downloads and"
+echo "   for the installing, and a \"still working\" line every $BEAT seconds when it is quiet."
 apt_update
 apt_install ca-certificates wget gpg unzip xz-utils procps nano file \
   tigervnc-standalone-server tigervnc-common xauth x11-xkb-utils xkb-data x11-xserver-utils \
@@ -153,7 +255,8 @@ apt_install ca-certificates wget gpg unzip xz-utils procps nano file \
 
 step "arm64 + x86_64 libraries"
 echo "   This is the longest step (about 90 packages, several minutes on a slow tablet). It is NOT stuck when it is quiet:"
-echo "   the downloads show a progress line, the installing shows a counter, and \"still working\" lines fill the gaps."
+echo "   the checking shows a moving bar, the downloads show a progress line, the installing shows a counter, and"
+echo "   \"still working\" lines fill the gaps."
 dpkg --add-architecture amd64
 apt_update
 LIBS="libx11-6 libx11-xcb1 libxcb1 libxext6 libxrender1 libxi6 libxcursor1 libxrandr2 libxfixes3

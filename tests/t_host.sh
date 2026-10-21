@@ -16,9 +16,29 @@ LOG=$T/calls.log; : > "$LOG"
 : > "$T/mounts.fake"                          # stands in for /proc/mounts: one line per pretend mount
 
 # stand-ins -----------------------------------------------------------------
-for c in mount umount; do
-  printf '#!/bin/bash\necho "%s $*" >> "%s"\n' "$c" "$LOG" > "$T/sysbin/$c"
-done
+printf '#!/bin/bash\necho "mount $*" >> "%s"\n' "$LOG" > "$T/sysbin/mount"
+# umount: logs the call. With FAKE_UMOUNT=real it also takes the mount out of the pretend /proc/mounts (like the real one does);
+# otherwise the mount is "busy" and stays.
+cat > "$T/sysbin/umount" <<EOF
+#!/bin/bash
+echo "umount \$*" >> "$LOG"
+if [ "\${FAKE_UMOUNT:-}" = real ]; then
+  grep -vF " \$1 " "$T/mounts.fake" > "$T/mounts.new"; mv "$T/mounts.new" "$T/mounts.fake"
+fi
+exit 0
+EOF
+# root's own tools, the ones the root step uses: am (force-stop), wm (the screen size), du and sync (the cache clearing)
+printf '#!/bin/bash\necho "root-am $*" >> "%s"\n' "$LOG" > "$T/sysbin/am"
+cat > "$T/sysbin/wm" <<EOF
+#!/bin/bash
+# FAKE_WM=1280x800 is the screen (default 1080x1920), FAKE_WM_OVERRIDE=720x1280 adds an "Override size" line, FAKE_WM=none: no answer
+echo "root-wm \$*" >> "$LOG"
+[ "\${FAKE_WM:-}" != none ] || exit 1
+echo "Physical size: \${FAKE_WM:-1080x1920}"
+[ -z "\${FAKE_WM_OVERRIDE:-}" ] || echo "Override size: \$FAKE_WM_OVERRIDE"
+EOF
+printf '#!/bin/bash\nexec /usr/bin/du "$@"\n' > "$T/sysbin/du"
+printf '#!/bin/bash\nexit 0\n' > "$T/sysbin/sync"
 # rm: logs the call, then really deletes (the uninstall test needs the folder to go)
 printf '#!/bin/bash\necho "rm $*" >> "%s"\nexec /bin/rm "$@"\n' "$LOG" > "$T/sysbin/rm"
 cat > "$T/sysbin/chroot" <<EOF
@@ -139,6 +159,9 @@ cp -r "$REPO/lib" "$T/lib"
 sed -e "s#/system/bin/#$T/sysbin/#g" \
     -e "s#/system/xbin/chroot#$T/none/chroot#g" \
     -e "s#/proc/mounts#$T/mounts.fake#g" \
+    -e "s#/proc/sys/vm/drop_caches#$T/drop_caches#g" \
+    -e "s#^X11_DATA=.*#X11_DATA=$T/x11data/\$X11_PKG#" \
+    -e "s#^X11_MEDIA=.*#X11_MEDIA=$T/appmedia/\$X11_PKG#" \
     -e "s#/sys/bus/usb/drivers/cdc_acm#$T/no-cdc_acm#g" \
     -e "s#free_mb /data)#free_mb $T/no-such-folder)#" \
     -e "s#/data/system/packages.list#$T/packages.list#g" \
@@ -147,7 +170,7 @@ sed -e "s#/system/bin/#$T/sysbin/#g" \
     -e "s#\[ -d /data/data \] || \[ -d /data/user/0 \]#[ -d $T/appdata ] || [ -d $T/appdata0 ]#" \
     -e 's#^is_root() .*#is_root() { [ "${FAKE_ROOT:-0}" = 1 ]; }#' "${SPFT_UNDER_TEST:-$REPO/spft}" > "$T/spft_test.sh"
 if grep -n '/system/' "$T/spft_test.sh" | grep -v -e 'tried /system/bin' -e '/system/\*'; then echo "NOTE: unreplaced /system paths above"; fi
-if grep -n -e '/data/system' -e '/data/user/' -e '"/data/data/' -e '/data/data \]' "$T/spft_test.sh"; then echo "NOTE: unreplaced /data paths above"; fi
+if grep -n -e '/data/system' -e '/data/user/' -e '"/data/data/' -e '/data/data \]' -e '^X11_DATA=/data' -e '^X11_MEDIA=/data' -e '/proc/sys/' "$T/spft_test.sh"; then echo "NOTE: unreplaced /data paths above"; fi
 
 run() { # run PATHDIR ARGS...
   local pd=$1; shift
@@ -155,6 +178,7 @@ run() { # run PATHDIR ARGS...
       PREF_STATE="$T/pref.state" PREF_LOG="$T/pref.log" PREF_SILENT="${PREF_SILENT:-}" PM_LIST="${PM_LIST:-}" FAKE_ACM="${FAKE_ACM:-}" \
       FAKE_UNAME_R="${FAKE_UNAME_R-5.10.43-android12-9}" FAKE_ARM64="${FAKE_ARM64:-1}" FAKE_SDK="${FAKE_SDK:-}" FAKE_REL="${FAKE_REL:-}" \
       FAKE_ABIS="${FAKE_ABIS:-}" FAKE_FREE_MB="${FAKE_FREE_MB:-}" SPFT_MIN_MB="${SPFT_MIN_MB:-}" \
+      FAKE_WM="${FAKE_WM:-}" FAKE_WM_OVERRIDE="${FAKE_WM_OVERRIDE:-}" FAKE_UMOUNT="${FAKE_UMOUNT:-}" \
       bash "${SCRIPT:-$T/spft_test.sh}" "$@"
 }
 lastcall() { awk '/^chroot-call$/ {buf=""} {buf = buf $0 "\n"} END {printf "%s", buf}' "$LOG" | sed -n 's/^chroot-arg://p'; }
@@ -232,6 +256,42 @@ echo; echo "=== V. vnc starts the tool in VNC mode"
 run "$T/bin" vnc; echo "exit=$?"
 lastcall | tail -n 2
 
+echo; echo "=== V2. a setting typed in front of the command (SPFT_STORAGE=off spft) must reach the shell in Debian"
+# On the way there su may drop the environment, and `enter` starts Debian's shell with env -i. This su does drop the settings
+# (the other stand-in passes everything on), so they only get there when spft puts them into the command line itself.
+mkdir -p "$T/bin6"; cp "$T"/bin/* "$T/bin6/"
+cat > "$T/bin6/su" <<EOF
+#!/bin/bash
+[ "\$1" = -c ] || exit 2
+[ "\$2" != "id -u" ] || { echo 0; exit 0; }
+cmd=\$(printf '%s' "\$2" | sed 's#SPFT_ROOT=$T/invisible#SPFT_ROOT=$T/root#')
+exec env -u SPFT_FAKE_KERNEL -u SPFT_STORAGE -u SPFT_GEOMETRY -u BOX64_LOG FAKE_ROOT=1 sh -c "\$cmd"
+EOF
+chmod +x "$T"/bin6/*
+# what the programs in Debian see: the command line is read there by a shell, with an empty environment
+seen() { env -i PATH=/usr/bin:/bin bash -c 'spft-run() { echo "display=$SPFT_DISPLAY fake_kernel=${SPFT_FAKE_KERNEL-unset} storage=${SPFT_STORAGE-unset} geometry=${SPFT_GEOMETRY-unset} box64_log=${BOX64_LOG-unset}"; }; '"$1"; }
+typed() { # typed "spft arguments" "what Debian must see" VAR=value...   run spft with those settings typed in front of it
+  local -a words
+  local want=$2 got
+  read -ra words <<< "$1"; shift 2
+  : > "$LOG"
+  env -i PATH="$T/bin6:/usr/bin:/bin" PREFIX="$T/pfx" SPFT_ROOT="$T/invisible" SPFT_DL="$T/dl" HOME="$T" TERM=xterm \
+      PREF_STATE="$T/pref.state" PREF_LOG="$T/pref.log" "$@" bash "$T/spft_test.sh" "${words[@]}" >/dev/null 2>&1; echo "exit=$?"
+  echo "  command line for Debian: $(lastcall | tail -n 1)"
+  got=$(seen "$(lastcall | tail -n 1)")
+  if [ "$got" = "$want" ]; then echo "ok: Debian sees  $got"; else echo "FAIL: Debian sees  $got   (wanted: $want)"; fi
+}
+typed "x11 plain" "display=x11 fake_kernel=off storage=/sdcard/My Folder (1) geometry=unset box64_log=3" \
+  SPFT_STORAGE='/sdcard/My Folder (1)' SPFT_FAKE_KERNEL=off BOX64_LOG=3
+typed "x11 plain" "display=x11 fake_kernel=unset storage=/sdcard/Shivraj's files geometry=unset box64_log=unset" \
+  SPFT_STORAGE="/sdcard/Shivraj's files"
+typed "vnc" "display=vnc fake_kernel=5.4.0 storage=unset geometry=1920x1080 box64_log=unset" \
+  SPFT_GEOMETRY=1920x1080 SPFT_FAKE_KERNEL=5.4.0
+echo "--- nothing typed in front: nothing is added"
+typed "x11 plain" "display=x11 fake_kernel=unset storage=unset geometry=unset box64_log=unset"
+echo "--- an empty setting counts as not set"
+typed "x11 plain" "display=x11 fake_kernel=unset storage=unset geometry=unset box64_log=unset" SPFT_STORAGE= BOX64_LOG=
+
 echo; echo "=== D. enter with a command"
 run "$T/bin" enter echo hi there; echo "exit=$?"
 echo "--- last chroot args:"; lastcall | tail -n 3
@@ -263,8 +323,137 @@ echo "-- only a socket file is left (the server was killed): it is removed, so t
 mksock
 run "$T/bin" stop; echo "exit=$?"
 if [ -e "$SOCK" ]; then echo "FAIL: the stale socket is still there"; else echo "ok: the stale socket is gone"; fi
-echo "-- nothing at all: nothing to report"
-run "$T/bin" stop | grep -c 'Termux:X11'
+echo "-- nothing at all: nothing to report about a server or a socket"
+run "$T/bin" stop | grep -c 'old Termux:X11 socket\|an old one left\|stopped the Termux:X11 server'
+
+echo; echo "=== I3. a program that ignores the polite request (TERM) is killed anyway: the tool, and the Termux:X11 server"
+mksock
+bash -c 'trap "" TERM; exec -a "box64 ./flash_tool" sleep 60' & DECOY=$!
+bash -c 'trap "" TERM; exec -a "termux-x11 com.termux.x11 :0" sleep 60' & XDECOY=$!
+sleep 1
+run "$T/bin" stop > "$T/stop.out" 2>&1; echo "exit=$?"
+grep -E '^(debian|x11-server)[ :]' "$T/stop.out"
+if kill -0 "$DECOY" 2>/dev/null; then echo "FAIL: the tool that ignores TERM is still running"; kill -9 "$DECOY"; else echo "ok: the tool that ignores TERM is gone"; fi
+if kill -0 "$XDECOY" 2>/dev/null; then echo "FAIL: the server that ignores TERM is still running"; kill -9 "$XDECOY"; else echo "ok: the Termux:X11 server that ignores TERM is gone"; fi
+if [ -e "$SOCK" ]; then echo "FAIL: the socket file is still there"; else echo "ok: the socket file is gone"; fi
+
+echo; echo "=== S. stop ends everything, unmounts, and clears the caches - and leaves the rest alone"
+mksock
+bash -c 'exec -a "box64 ./flash_tool" sleep 60' & DECOY=$!
+bash -c 'exec -a "termux-x11 com.termux.x11 :0" sleep 60' & XDECOY=$!
+# what is a cache: Debian's /tmp and ~/.cache, the Termux:X11 app's cache folders (private and on the shared storage)
+mkdir -p "$T/root/tmp/runtime-root" "$T/root/tmp/.X11-unix" "$T/root/root/.cache/fontconfig" "$T/x11data/com.termux.x11/cache" \
+         "$T/x11data/com.termux.x11/code_cache" "$T/appmedia/com.termux.x11/cache"
+head -c 300000 /dev/zero > "$T/root/tmp/spft-kernelfix.so"; echo x > "$T/root/tmp/runtime-root/sock"; echo x > "$T/root/tmp/.hidden-file"
+head -c 500000 /dev/zero > "$T/root/root/.cache/fontconfig/cache-1"
+head -c 700000 /dev/zero > "$T/x11data/com.termux.x11/cache/webview"
+echo x > "$T/x11data/com.termux.x11/code_cache/c"; echo x > "$T/appmedia/com.termux.x11/cache/m"
+# what must stay: the tool's own logs, Debian's settings and apt's downloads, the Termux:X11 app's settings
+mkdir -p "$T/root/opt/spft-current/log" "$T/root/root/.config" "$T/root/var/cache/apt/archives" "$T/x11data/com.termux.x11/shared_prefs"
+echo keep > "$T/root/opt/spft-current/log/flash.log"; echo keep > "$T/root/root/.config/settings.conf"
+echo keep > "$T/root/var/cache/apt/archives/pkg.deb"; echo keep > "$T/x11data/com.termux.x11/shared_prefs/prefs.xml"
+printf '/dev %s/root/dev tmpfs rw 0 0\nproc %s/root/proc proc rw 0 0\n/data/media %s/root/mnt/sdcard sdcardfs rw 0 0\n' "$T" "$T" "$T" > "$T/mounts.fake"
+sleep 1
+: > "$LOG"; rm -f "$T/drop_caches"
+FAKE_UMOUNT=real run "$T/bin" stop > "$T/stop.out" 2>&1; echo "exit=$?"
+sed -e 's/[0-9][0-9]*\.[0-9] MB freed/N.N MB freed/' "$T/stop.out" | sed "s#$T#\$T#g"
+gone() { if [ -e "$2" ]; then echo "FAIL: still there: $1"; else echo "ok: gone - $1"; fi; }
+kept() { if [ -e "$2" ]; then echo "ok: kept - $1"; else echo "FAIL: deleted: $1"; fi; }
+if kill -0 "$DECOY" 2>/dev/null; then echo "FAIL: the tool is still running"; kill "$DECOY"; else echo "ok: the tool process is gone"; fi
+if kill -0 "$XDECOY" 2>/dev/null; then echo "FAIL: the server is still running"; kill "$XDECOY"; else echo "ok: the Termux:X11 server process is gone"; fi
+gone "the server's socket file" "$SOCK"
+gone "the kernel-fix library in Debian's /tmp" "$T/root/tmp/spft-kernelfix.so"
+gone "a socket in a folder in /tmp" "$T/root/tmp/runtime-root"
+gone "a hidden file in /tmp" "$T/root/tmp/.hidden-file"
+gone "Debian's ~/.cache" "$T/root/root/.cache/fontconfig"
+gone "the app's cache" "$T/x11data/com.termux.x11/cache/webview"
+gone "the app's code cache" "$T/x11data/com.termux.x11/code_cache/c"
+gone "the app's cache on the shared storage" "$T/appmedia/com.termux.x11/cache/m"
+kept "the folder /tmp itself" "$T/root/tmp"
+kept "the app's cache folder itself" "$T/x11data/com.termux.x11/cache"
+kept "the tool's log" "$T/root/opt/spft-current/log/flash.log"
+kept "Debian's settings" "$T/root/root/.config/settings.conf"
+kept "apt's downloaded file (an interrupted install resumes from it)" "$T/root/var/cache/apt/archives/pkg.deb"
+kept "the Termux:X11 app's settings" "$T/x11data/com.termux.x11/shared_prefs/prefs.xml"
+freed=$(sed -n 's/.*cleared, \([0-9]*\)\.[0-9] MB freed.*/\1/p' "$T/stop.out")
+if [ "${freed:-0}" -ge 1 ]; then echo "ok: at least 1 MB was freed (3 MB of files were made)"; else echo "FAIL: freed '${freed:-nothing}' MB"; fi
+echo "--- unmount calls (in this order, and only for what was mounted):"; grep '^umount ' "$LOG" | sed "s#$T#\$T#g"
+echo "--- force-stop calls: $(grep -c '^root-am force-stop com.termux.x11$' "$LOG")   wake-unlock calls: $(grep -c '^wake-unlock$' "$LOG")"
+echo "--- the memory cache was dropped: $(tr -d '\n' < "$T/drop_caches" 2>/dev/null)"
+if grep -qF "$T/root" "$T/mounts.fake"; then echo "FAIL: something is still mounted"; else echo "ok: nothing is mounted any more"; fi
+
+echo; echo "=== S2. a mount that will not go: a WARNING, Debian's own folders are left alone, the rest is still cleared"
+head -c 300000 /dev/zero > "$T/root/tmp/spft-kernelfix.so"; mkdir -p "$T/x11data/com.termux.x11/cache"; echo x > "$T/x11data/com.termux.x11/cache/webview"
+printf '/dev %s/root/dev tmpfs rw 0 0\n' "$T" > "$T/mounts.fake"
+run "$T/bin" stop 2>&1 | sed -e 's/[0-9][0-9]*\.[0-9] MB freed/N.N MB freed/' -e "s#$T#\$T#g"; echo "exit=${PIPESTATUS[0]}"
+kept "Debian's /tmp file (something is still mounted in Debian, so it was not touched)" "$T/root/tmp/spft-kernelfix.so"
+gone "the app's cache (it is not in Debian)" "$T/x11data/com.termux.x11/cache/webview"
+: > "$T/mounts.fake"
+
+echo; echo "=== S3. clear_dir on its own: it refuses shallow folders and walks around mount points"
+(
+  # the two functions, as they are in the script under test
+  eval "$(sed -n '/^is_mounted() /p;/^clear_dir() {/,/^}/p' "$T/spft_test.sh")"
+  SH=/tmp/spft-shallow.$$     # only two levels deep: refused
+  if mkdir "$SH" 2>/dev/null; then
+    echo x > "$SH/file"
+    clear_dir "$SH"; echo "a folder two levels deep: status=$?"
+    if [ -e "$SH/file" ]; then echo "ok: nothing was deleted in it"; else echo "FAIL: a shallow folder was emptied"; fi
+    rm -rf "$SH"
+  else
+    echo "(skipped: /tmp is not writable here)"
+  fi
+  D=$T/clear-test
+  mkdir -p "$D/a/b" "$D/mnt/deep" "$D/.hid"; echo x > "$D/f"; echo x > "$D/.dot"; echo x > "$D/mnt/deep/f"; ln -s /etc "$D/link"
+  printf 'dev %s tmpfs rw 0 0\n' "$D/mnt" > "$T/mounts.fake"
+  clear_dir "$D"; echo "a folder with a mount point inside: status=$?"
+  for x in a f .dot .hid link; do if [ -e "$D/$x" ] || [ -L "$D/$x" ]; then echo "FAIL: $x is still there"; else echo "ok: $x is gone"; fi; done
+  if [ -e "$D/mnt/deep/f" ]; then echo "ok: what is inside the mount point was not touched"; else echo "FAIL: the delete went through the mount point"; fi
+  if [ -e /etc/hostname ] || [ -e /etc/passwd ]; then echo "ok: the link was removed, its target was not followed"; else echo "FAIL: /etc is gone"; fi
+  : > "$T/mounts.fake"
+  clear_dir "$T/no-such-folder/at/all"; echo "a folder that is not there: status=$?"
+)
+
+echo; echo "=== Z. the zoom picks itself: the biggest at which the tool's window (about 720 pixels tall) still fits"
+zoom_for() { # zoom_for WIDTHxHEIGHT [ARGS...]   starts the tool and prints the zoom that was set
+  local scr=$1; shift
+  : > "$T/pref.log"; reset_prefs; rm -f "$T/dl/x11-prefs.orig"; : > "$LOG"
+  FAKE_WM=$scr FAKE_WM_OVERRIDE="${OVR:-}" run "$T/bin" x11 "$@" > "$T/z.out" 2>&1
+  grep '^displayScale=' "$T/pref.state" | tr '\n' ' '
+}
+for scr in 1280x800 1080x1920 800x1280 720x1280 1200x1920 1440x3200 480x800; do
+  z=$(zoom_for "$scr"); z=${z#displayScale=}; z=${z% }
+  short=${scr%x*}; [ "${scr#*x}" -ge "$short" ] || short=${scr#*x}
+  h=$((short * 100 / z))
+  echo "screen $scr -> zoom $z, a Termux:X11 screen $h pixels tall"
+  if [ "$h" -ge 740 ]; then echo "ok: tall enough"; else echo "FAIL: the window would be cut off"; fi
+  if [ $((z + 5)) -le 300 ] && [ $((short * 100 / (z + 5))) -ge 740 ]; then echo "FAIL: a bigger zoom would still fit"; fi
+done
+echo "-- what the user sees about it:"
+FAKE_WM=1280x800 run "$T/bin" x11 2>&1 | grep -E '^>> (screen|could not)'
+echo "-- 'Override size' (the phone was set to another size with wm size) wins over the real size"
+OVR=720x1600 zoom_for 1080x2400; echo
+echo "-- zoom=auto written out is the same as no zoom"
+zoom_for 1280x800 zoom=auto; echo
+echo "-- a zoom of your own is used as it is, and the screen is not even asked"
+zoom_for 1280x800 zoom=120; echo "   screen asked: $(grep -c '^root-wm' "$LOG") times"
+echo "-- portrait: no zoom, and the screen is not asked"
+zoom_for 1280x800 portrait; echo "   screen asked: $(grep -c '^root-wm' "$LOG") times"
+echo "-- the screen size can't be read: 150, and what to do if the window is cut off"
+FAKE_WM=none run "$T/bin" x11 2>&1 | grep -E '^>> (screen|could not)'
+z=$(zoom_for none); echo "$z"
+echo "-- an answer that is not a size"
+printf '#!/bin/bash\necho "root-wm $*" >> "%s"\necho "Physical size: unknown"\n' "$LOG" > "$T/sysbin/wm"
+z=$(zoom_for 1280x800); echo "$z"
+cat > "$T/sysbin/wm" <<EOF
+#!/bin/bash
+echo "root-wm \$*" >> "$LOG"
+[ "\${FAKE_WM:-}" != none ] || exit 1
+echo "Physical size: \${FAKE_WM:-1080x1920}"
+[ -z "\${FAKE_WM_OVERRIDE:-}" ] || echo "Override size: \$FAKE_WM_OVERRIDE"
+EOF
+chmod +x "$T/sysbin/wm"
+reset_prefs; rm -f "$T/dl/x11-prefs.orig"
 
 echo; echo "=== J. umount also stops processes first, then reports"
 bash -c 'exec -a "box64 ./flash_tool" sleep 60' & DECOY=$!
@@ -377,7 +566,7 @@ FAKE_UNAME_R='' FAKE_ACM=y run "$T/bin" check 2>&1 | grep '^kernel-ver'
 
 echo; echo "=== X7. the Result block: what blocks spft, and what to keep in mind"
 echo "-- the tablet from the report: Android 11, kernel 4.19.127, no cdc_acm, plenty of space"
-FAKE_UNAME_R=4.19.127-g8d3429bdb336 FAKE_ACM=n FAKE_SDK=30 FAKE_REL=11 FAKE_ABIS=arm64-v8a,armeabi-v7a,armeabi FAKE_FREE_MB=12000 \
+FAKE_UNAME_R=4.19.127-g8d3429bdb336 FAKE_ACM=n FAKE_SDK=30 FAKE_REL=11 FAKE_ABIS=arm64-v8a,armeabi-v7a,armeabi FAKE_FREE_MB=12000 FAKE_WM=1280x800 \
   run "$T/bin" check 2>&1 | sed -n '/^== phone/,$p'
 echo "-- a phone that has everything: no 'Keep in mind' at all"
 FAKE_ACM=y FAKE_SDK=29 FAKE_REL=10 FAKE_FREE_MB=9000 run "$T/bin" check 2>&1 | sed -n '/^== Result/,$p'
@@ -393,6 +582,10 @@ FAKE_ACM=y run "$T/bin" check 2>&1 | sed -n '/^chroot/p;/^== Result/,$p'
 mv "$T/chroot.off" "$T/sysbin/chroot"
 echo "-- Android 13: the hint to the README section on killed background processes"
 FAKE_ACM=y FAKE_SDK=33 FAKE_REL=13 run "$T/bin" check 2>&1 | sed -n '/^== Result/,$p'
+echo "-- the screen row: a tablet (1280x800), a phone whose size was overridden, and a phone that will not say"
+FAKE_ACM=y FAKE_WM=1280x800 run "$T/bin" check 2>&1 | grep '^screen'
+FAKE_ACM=y FAKE_WM=1080x2400 FAKE_WM_OVERRIDE=720x1600 run "$T/bin" check 2>&1 | grep '^screen'
+FAKE_ACM=y FAKE_WM=none run "$T/bin" check 2>&1 | grep '^screen'
 echo "-- an old kernel, no driver, 32-bit: everything at once"
 FAKE_UNAME_R=3.18.71 FAKE_ARM64=0 FAKE_ACM=n FAKE_FREE_MB=1000 FAKE_SDK=31 run "$T/bin" check 2>&1 | sed -n '/^== Result/,$p'
 echo "-- the check is only a read: it changed nothing in Debian"

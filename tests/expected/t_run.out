@@ -126,4 +126,30 @@ BOX64 preload=$T/kernelfix.so:/opt/other.so
 === 23. the kernel-fix files are not there (an old Debian setup): the tool simply starts
 BOX64 args=[./flash_tool] DISPLAY=:1 NOMITSHM=1 QTPLUG=unset
 BOX64 preload=unset
+
+=== 24. the tool starts with the phone's internal storage as its home folder, so that its file windows open there
+file windows: start in $T/storage (the phone's internal storage). To turn this off: SPFT_STORAGE=off spft
+BOX64 home=$T/storage xdgconf=$T/home/.config xdgcache=$T/home/.cache xdgdata=$T/home/.local/share
+--- the tool's own settings and caches stay where they were (Debian's /root, here $T/home): the XDG folders above say so
+
+=== 25. SPFT_STORAGE=auto is /sdcard (a stand-in folder here); when that is not there, home stays as it is
+file windows: start in $T/sdcard (the phone's internal storage). To turn this off: SPFT_STORAGE=off spft
+BOX64 home=$T/sdcard xdgconf=$T/home/.config xdgcache=$T/home/.cache xdgdata=$T/home/.local/share
+--- not there:
+(the folder $T/sdcard is not there, so the file windows start in $T/home)
+BOX64 home=$T/home xdgconf=unset xdgcache=unset xdgdata=unset
+--- a folder that was asked for by name and is not there:
+(the folder $T/no-such-folder is not there, so the file windows start in $T/home)
+BOX64 home=$T/home xdgconf=unset xdgcache=unset xdgdata=unset
+
+=== 26. SPFT_STORAGE=off: home stays, and no XDG folder is set
+BOX64 home=$T/home xdgconf=unset xdgcache=unset xdgdata=unset
+
+=== 27. an XDG folder that is set already is kept as it is
+BOX64 home=$T/storage xdgconf=/my/conf xdgcache=$T/home/.cache xdgdata=$T/home/.local/share
+
+=== 28. only the tool gets the new home: openbox's rc.xml is still made in Debian's own home, and nothing is written to the storage
+BOX64 home=$T/storage xdgconf=$T/home/.config xdgcache=$T/home/.cache xdgdata=$T/home/.local/share
+ok: rc.xml is in Debian's home
+ok: the storage folder is untouched
 cleaned up

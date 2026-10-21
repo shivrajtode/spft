@@ -10,17 +10,19 @@ exit=1
 
 === C. x11, first run (server not running yet)
 >> starting the Termux:X11 server
->> setting up the Termux:X11 display: landscape, fullscreen, zoom 150%
+>> screen 1080x1920: zoom 145% keeps the whole tool window on it (choose your own with: spft x11 zoom=N)
+>> setting up the Termux:X11 display: landscape, fullscreen, zoom 145%
    additionalKbdVisible: true -> false
    fullscreen: false -> true
    forceOrientation: portrait -> landscape
-   displayScale: 100 -> 150
+   displayScale: 100 -> 145
    displayResolutionMode: native -> scaled
    displayFilteringMode: nearest -> bilinear
 exit=0
 --- calls:
 termux-x11 :0
 am start --user 0 -n com.termux.x11/com.termux.x11.MainActivity
+root-wm size
 wake-lock
 mount -o bind /dev $T/root/dev
 mount -o bind /dev/pts $T/root/dev/pts
@@ -54,25 +56,28 @@ kernelfix.so.b64 identical to lib/kernelfix.so.b64
 lib spft 
 copy of lib/run.sh is identical
 --- Termux:X11 settings now (the app started out in portrait, at the phone's own size):
-fullscreen=true forceOrientation=landscape displayScale=150 displayResolutionMode=scaled displayFilteringMode=bilinear additionalKbdVisible=false showAdditionalKbd=true touchMode=1 
+fullscreen=true forceOrientation=landscape displayScale=145 displayResolutionMode=scaled displayFilteringMode=bilinear additionalKbdVisible=false showAdditionalKbd=true touchMode=1 
 --- saved for 'x11 reset':
 fullscreen:false forceOrientation:portrait displayScale:100 displayResolutionMode:native displayFilteringMode:nearest additionalKbdVisible:true 
 --- the phone was kept awake: wake-lock calls = 1
 
 === F. x11 again (server already up -> must not start a second one, no setting changed again)
->> setting up the Termux:X11 display: landscape, fullscreen, zoom 150%
+>> screen 1080x1920: zoom 145% keeps the whole tool window on it (choose your own with: spft x11 zoom=N)
+>> setting up the Termux:X11 display: landscape, fullscreen, zoom 145%
 exit=0
 termux-x11 starts: 0   am calls: 1
 settings-tool calls: list=1 set=0
 
 === H. plain `spft` (no argument) does the same as x11
->> setting up the Termux:X11 display: landscape, fullscreen, zoom 150%
+>> screen 1080x1920: zoom 145% keeps the whole tool window on it (choose your own with: spft x11 zoom=N)
+>> setting up the Termux:X11 display: landscape, fullscreen, zoom 145%
 exit=0
 tool started: 1   last chroot args:
 -lc
 SPFT_DISPLAY=x11 spft-run
 
 === H2. spft start / spft help / an unknown command
+>> screen 1080x1920: zoom 145% keeps the whole tool window on it (choose your own with: spft x11 zoom=N)
 start: exit=0   tool started: 1
 spft - SP Flash Tool on a rooted phone or tablet (Termux + Debian chroot + box64 + Termux:X11)
   spft                      start SP Flash Tool (the same as: spft x11)
@@ -84,7 +89,7 @@ unknown: exit=1
 >> setting up the Termux:X11 display: reverse landscape, fullscreen, zoom 200%
    additionalKbdVisible: false -> true
    forceOrientation: landscape -> reverse landscape
-   displayScale: 150 -> 200
+   displayScale: 145 -> 200
    displayFilteringMode: bilinear -> nearest
 exit=0
 fullscreen=true forceOrientation=reverse landscape displayScale=200 displayResolutionMode=scaled displayFilteringMode=nearest additionalKbdVisible=true showAdditionalKbd=true touchMode=1 
@@ -120,6 +125,25 @@ exit=0
 -lc
 SPFT_DISPLAY=vnc spft-run
 
+=== V2. a setting typed in front of the command (SPFT_STORAGE=off spft) must reach the shell in Debian
+exit=0
+  command line for Debian: SPFT_DISPLAY=x11 SPFT_FAKE_KERNEL='off' SPFT_STORAGE='/sdcard/My Folder (1)' BOX64_LOG='3' spft-run
+ok: Debian sees  display=x11 fake_kernel=off storage=/sdcard/My Folder (1) geometry=unset box64_log=3
+exit=0
+  command line for Debian: SPFT_DISPLAY=x11 SPFT_STORAGE='/sdcard/Shivraj'\''s files' spft-run
+ok: Debian sees  display=x11 fake_kernel=unset storage=/sdcard/Shivraj's files geometry=unset box64_log=unset
+exit=0
+  command line for Debian: SPFT_DISPLAY=vnc SPFT_FAKE_KERNEL='5.4.0' SPFT_GEOMETRY='1920x1080' spft-run
+ok: Debian sees  display=vnc fake_kernel=5.4.0 storage=unset geometry=1920x1080 box64_log=unset
+--- nothing typed in front: nothing is added
+exit=0
+  command line for Debian: SPFT_DISPLAY=x11 spft-run
+ok: Debian sees  display=x11 fake_kernel=unset storage=unset geometry=unset box64_log=unset
+--- an empty setting counts as not set
+exit=0
+  command line for Debian: SPFT_DISPLAY=x11 spft-run
+ok: Debian sees  display=x11 fake_kernel=unset storage=unset geometry=unset box64_log=unset
+
 === D. enter with a command
 exit=0
 --- last chroot args:
@@ -134,28 +158,165 @@ exit=0
 -l
 
 === I. stop closes the tool and lets the phone sleep again; a second stop finds nothing
-stopped 1 process(es) that were running inside Debian
-removed an old Termux:X11 socket (no server was running)
+== stopping everything of spft ==
+debian    : stopped 1 process(es): SP Flash Tool, box64, openbox and everything else that ran inside Debian
+x11-server: no server was running; removed the file that an old one left behind
+x11-app   : the Termux:X11 app is force-stopped
+mounts    : all unmounted (Debian is no longer linked to the phone's /dev, /proc, /sys and storage)
+cache     : cleared, 0.0 MB freed (Debian's /tmp and ~/.cache, the Termux:X11 app's cache)
+memory    : the phone's file cache was dropped, so more RAM is free
+wakelock  : released, the phone may sleep again
+
+All of spft is stopped. Start it again with:  spft
 exit=0
 ok: the tool process is gone
 wake-unlock calls: 1
-stopped 0 process(es) that were running inside Debian
+== stopping everything of spft ==
+debian    : nothing was running inside Debian
+x11-server: no server was running
+x11-app   : the Termux:X11 app is force-stopped
+mounts    : all unmounted (Debian is no longer linked to the phone's /dev, /proc, /sys and storage)
+cache     : cleared, 0.0 MB freed (Debian's /tmp and ~/.cache, the Termux:X11 app's cache)
+memory    : the phone's file cache was dropped, so more RAM is free
+wakelock  : released, the phone may sleep again
+
+All of spft is stopped. Start it again with:  spft
 exit=0
 
 === I2. stop also stops the Termux:X11 server, and removes the socket that a killed server leaves behind
 -- a server is running (its process is called "termux-x11 <app id> :0")
-stopped 0 process(es) that were running inside Debian
-stopped the Termux:X11 server
+== stopping everything of spft ==
+debian    : nothing was running inside Debian
+x11-server: stopped the Termux:X11 server
+x11-app   : the Termux:X11 app is force-stopped
+mounts    : all unmounted (Debian is no longer linked to the phone's /dev, /proc, /sys and storage)
+cache     : cleared, 0.0 MB freed (Debian's /tmp and ~/.cache, the Termux:X11 app's cache)
+memory    : the phone's file cache was dropped, so more RAM is free
+wakelock  : released, the phone may sleep again
+
+All of spft is stopped. Start it again with:  spft
 exit=0
 ok: the server process is gone
 ok: the socket file is gone
 -- only a socket file is left (the server was killed): it is removed, so that the next spft starts a new server
-stopped 0 process(es) that were running inside Debian
-removed an old Termux:X11 socket (no server was running)
+== stopping everything of spft ==
+debian    : nothing was running inside Debian
+x11-server: no server was running; removed the file that an old one left behind
+x11-app   : the Termux:X11 app is force-stopped
+mounts    : all unmounted (Debian is no longer linked to the phone's /dev, /proc, /sys and storage)
+cache     : cleared, 0.0 MB freed (Debian's /tmp and ~/.cache, the Termux:X11 app's cache)
+memory    : the phone's file cache was dropped, so more RAM is free
+wakelock  : released, the phone may sleep again
+
+All of spft is stopped. Start it again with:  spft
 exit=0
 ok: the stale socket is gone
--- nothing at all: nothing to report
+-- nothing at all: nothing to report about a server or a socket
 0
+
+=== I3. a program that ignores the polite request (TERM) is killed anyway: the tool, and the Termux:X11 server
+exit=0
+debian    : stopped 1 process(es): SP Flash Tool, box64, openbox and everything else that ran inside Debian
+x11-server: stopped the Termux:X11 server
+ok: the tool that ignores TERM is gone
+ok: the Termux:X11 server that ignores TERM is gone
+ok: the socket file is gone
+
+=== S. stop ends everything, unmounts, and clears the caches - and leaves the rest alone
+exit=0
+== stopping everything of spft ==
+debian    : stopped 1 process(es): SP Flash Tool, box64, openbox and everything else that ran inside Debian
+x11-server: stopped the Termux:X11 server
+x11-app   : the Termux:X11 app is force-stopped
+mounts    : all unmounted (Debian is no longer linked to the phone's /dev, /proc, /sys and storage)
+cache     : cleared, N.N MB freed (Debian's /tmp and ~/.cache, the Termux:X11 app's cache)
+memory    : the phone's file cache was dropped, so more RAM is free
+wakelock  : released, the phone may sleep again
+
+All of spft is stopped. Start it again with:  spft
+ok: the tool process is gone
+ok: the Termux:X11 server process is gone
+ok: gone - the server's socket file
+ok: gone - the kernel-fix library in Debian's /tmp
+ok: gone - a socket in a folder in /tmp
+ok: gone - a hidden file in /tmp
+ok: gone - Debian's ~/.cache
+ok: gone - the app's cache
+ok: gone - the app's code cache
+ok: gone - the app's cache on the shared storage
+ok: kept - the folder /tmp itself
+ok: kept - the app's cache folder itself
+ok: kept - the tool's log
+ok: kept - Debian's settings
+ok: kept - apt's downloaded file (an interrupted install resumes from it)
+ok: kept - the Termux:X11 app's settings
+ok: at least 1 MB was freed (3 MB of files were made)
+--- unmount calls (in this order, and only for what was mounted):
+umount $T/root/mnt/sdcard
+umount $T/root/dev
+umount $T/root/proc
+--- force-stop calls: 1   wake-unlock calls: 1
+--- the memory cache was dropped: 3
+ok: nothing is mounted any more
+
+=== S2. a mount that will not go: a WARNING, Debian's own folders are left alone, the rest is still cleared
+== stopping everything of spft ==
+debian    : nothing was running inside Debian
+x11-server: no server was running
+x11-app   : the Termux:X11 app is force-stopped
+mounts    : WARNING: still mounted (busy?) - $T/root/dev 
+cache     : cleared, N.N MB freed (the Termux:X11 app's cache only. Debian's own folders were left alone: something is still mounted in it)
+memory    : the phone's file cache was dropped, so more RAM is free
+wakelock  : released, the phone may sleep again
+
+All of spft is stopped. Start it again with:  spft
+exit=0
+ok: kept - Debian's /tmp file (something is still mounted in Debian, so it was not touched)
+ok: gone - the app's cache (it is not in Debian)
+
+=== S3. clear_dir on its own: it refuses shallow folders and walks around mount points
+a folder two levels deep: status=1
+ok: nothing was deleted in it
+a folder with a mount point inside: status=0
+ok: a is gone
+ok: f is gone
+ok: .dot is gone
+ok: .hid is gone
+ok: link is gone
+ok: what is inside the mount point was not touched
+ok: the link was removed, its target was not followed
+a folder that is not there: status=0
+
+=== Z. the zoom picks itself: the biggest at which the tool's window (about 720 pixels tall) still fits
+screen 1280x800 -> zoom 105, a Termux:X11 screen 761 pixels tall
+ok: tall enough
+screen 1080x1920 -> zoom 145, a Termux:X11 screen 744 pixels tall
+ok: tall enough
+screen 800x1280 -> zoom 105, a Termux:X11 screen 761 pixels tall
+ok: tall enough
+screen 720x1280 -> zoom 95, a Termux:X11 screen 757 pixels tall
+ok: tall enough
+screen 1200x1920 -> zoom 160, a Termux:X11 screen 750 pixels tall
+ok: tall enough
+screen 1440x3200 -> zoom 190, a Termux:X11 screen 757 pixels tall
+ok: tall enough
+screen 480x800 -> zoom 60, a Termux:X11 screen 800 pixels tall
+ok: tall enough
+-- what the user sees about it:
+>> screen 1280x800: zoom 105% keeps the whole tool window on it (choose your own with: spft x11 zoom=N)
+-- 'Override size' (the phone was set to another size with wm size) wins over the real size
+displayScale=95 
+-- zoom=auto written out is the same as no zoom
+displayScale=105 
+-- a zoom of your own is used as it is, and the screen is not even asked
+displayScale=120    screen asked: 0 times
+-- portrait: no zoom, and the screen is not asked
+displayScale=100    screen asked: 0 times
+-- the screen size can't be read: 150, and what to do if the window is cut off
+>> could not read the screen size, so zoom 150 is used. If the bottom of the tool window is cut off, run: spft x11 zoom=110
+displayScale=150 
+-- an answer that is not a size
+displayScale=150 
 
 === J. umount also stops processes first, then reports
 stopped 1 process(es) that were running inside Debian
@@ -173,10 +334,10 @@ exit=1
 spft: x11: unknown option 'sideways'  (options: reverse portrait auto zoom=N keys plain reset)
 exit=1
 -- x11 zoom=abc
-spft: x11: zoom=N needs a whole number, for example zoom=150
+spft: x11: zoom=N needs a whole number (or the word auto), for example zoom=150
 exit=1
 -- x11 zoom=
-spft: x11: zoom=N needs a whole number, for example zoom=150
+spft: x11: zoom=N needs a whole number (or the word auto), for example zoom=150
 exit=1
 -- x11 zoom=500
 spft: x11: zoom must be between 30 and 300
@@ -192,43 +353,46 @@ spft: x11: zoom must be between 30 and 300
 exit=1
 
 === O. an older Termux:X11 without displayFilteringMode and additionalKbdVisible
->> starting the Termux:X11 server
->> setting up the Termux:X11 display: landscape, fullscreen, zoom 150%
+>> screen 1080x1920: zoom 145% keeps the whole tool window on it (choose your own with: spft x11 zoom=N)
+>> setting up the Termux:X11 display: landscape, fullscreen, zoom 145%
    fullscreen: false -> true
    forceOrientation: portrait -> landscape
-   displayScale: 100 -> 150
+   displayScale: 100 -> 145
    displayResolutionMode: native -> scaled
    not applied: additionalKbdVisible(not in this app version) displayFilteringMode(not in this app version)
 exit=0
-fullscreen=true forceOrientation=landscape displayScale=150 displayResolutionMode=scaled showAdditionalKbd=true touchMode=1 
+fullscreen=true forceOrientation=landscape displayScale=145 displayResolutionMode=scaled showAdditionalKbd=true touchMode=1 
 tool started: 1
 
 === O2. an app version without forceOrientation: the by-hand steps are shown
->> setting up the Termux:X11 display: landscape, fullscreen, zoom 150%
+>> screen 1080x1920: zoom 145% keeps the whole tool window on it (choose your own with: spft x11 zoom=N)
+>> setting up the Termux:X11 display: landscape, fullscreen, zoom 145%
    additionalKbdVisible: true -> false
    fullscreen: false -> true
-   displayScale: 100 -> 150
+   displayScale: 100 -> 145
    displayResolutionMode: native -> scaled
    displayFilteringMode: nearest -> bilinear
    not applied: forceOrientation(not in this app version)
    By hand instead: in the Termux:X11 app open Preferences > Output and set
-     Screen orientation = landscape    Fullscreen = on    Display resolution mode = scaled    Display scale, % = 150
+     Screen orientation = landscape    Fullscreen = on    Display resolution mode = scaled    Display scale, % = 145
 exit=0
 tool started: 1
 
 === P. the Termux:X11 app does not answer (about 8 s)
->> setting up the Termux:X11 display: landscape, fullscreen, zoom 150%
+>> screen 1080x1920: zoom 145% keeps the whole tool window on it (choose your own with: spft x11 zoom=N)
+>> setting up the Termux:X11 display: landscape, fullscreen, zoom 145%
 >> the Termux:X11 app did not answer, so its settings were not changed
    By hand instead: in the Termux:X11 app open Preferences > Output and set
-     Screen orientation = landscape    Fullscreen = on    Display resolution mode = scaled    Display scale, % = 150
+     Screen orientation = landscape    Fullscreen = on    Display resolution mode = scaled    Display scale, % = 145
 exit=0
 settings unchanged: fullscreen=false forceOrientation=portrait displayScale=100 displayResolutionMode=native displayFilteringMode=nearest additionalKbdVisible=true showAdditionalKbd=true touchMode=1 
 tool started: 1
 
 === Q. a Termux:X11 package without termux-x11-preference
+>> screen 1080x1920: zoom 145% keeps the whole tool window on it (choose your own with: spft x11 zoom=N)
 >> termux-x11-preference is missing (try: pkg upgrade termux-x11-nightly), so the display can't be set up for you
    By hand instead: in the Termux:X11 app open Preferences > Output and set
-     Screen orientation = landscape    Fullscreen = on    Display resolution mode = scaled    Display scale, % = 150
+     Screen orientation = landscape    Fullscreen = on    Display resolution mode = scaled    Display scale, % = 145
 exit=0
 tool started: 1
 
@@ -245,6 +409,7 @@ kernel-ver: 5.10.43-android12-9 - OK for SP Flash Tool v5 (it asks for 4.19.14 o
 cdc_acm   : MISSING - this kernel was built without it (CONFIG_USB_ACM), so SP Flash Tool can't see a device from this phone (use mtkclient instead)
 chroot    : $T/sysbin/chroot
 android   : unknown (API ?), ABIs: ?
+screen    : 1080x1920 pixels - spft x11 picks zoom 145%, a Termux:X11 screen 744 pixels tall (the tool's window needs about 720)
 debian    : installed in $T/root
 box64     : not installed yet (spft install does that)
 tool      : not installed yet (spft install gets it, or: spft tool)
@@ -355,6 +520,7 @@ cdc_acm   : MISSING - this kernel was built without it (CONFIG_USB_ACM), so SP F
 chroot    : $T/sysbin/chroot
 android   : 11 (API 30), ABIs: arm64-v8a,armeabi-v7a,armeabi
 free      : 12000 MB on /data (the install needs about 3000)
+screen    : 1280x800 pixels - spft x11 picks zoom 105%, a Termux:X11 screen 761 pixels tall (the tool's window needs about 720)
 debian    : installed in $T/root
 box64     : not installed yet (spft install does that)
 tool      : not installed yet (spft install gets it, or: spft tool)
@@ -390,6 +556,10 @@ spft can NOT run on this device, because:
 spft can be installed and started on this device.
 Keep in mind:
  - Android 12 or newer: Android may kill background processes. If SP Flash Tool or Termux closes by itself, see the README, section "Android 12 and newer".
+-- the screen row: a tablet (1280x800), a phone whose size was overridden, and a phone that will not say
+screen    : 1280x800 pixels - spft x11 picks zoom 105%, a Termux:X11 screen 761 pixels tall (the tool's window needs about 720)
+screen    : 720x1600 pixels - spft x11 picks zoom 95%, a Termux:X11 screen 757 pixels tall (the tool's window needs about 720)
+screen    : could not read the size (wm size) - spft x11 then uses zoom 150. If the bottom of the tool window is cut off: spft x11 zoom=110
 -- an old kernel, no driver, 32-bit: everything at once
 == Result ==
 spft can NOT run on this device, because:

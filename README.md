@@ -80,6 +80,7 @@ cdc_acm   : MISSING - this kernel was built without it (CONFIG_USB_ACM), so SP F
 chroot    : /system/bin/chroot
 android   : 11 (API 30), ABIs: arm64-v8a,armeabi-v7a,armeabi
 free      : 27360 MB on /data (the install needs about 3000)
+screen    : 1280x800 pixels - spft x11 picks zoom 105%, a Termux:X11 screen 761 pixels tall (the tool's window needs about 720)
 debian    : not installed yet (spft install does that)
 box64     : not installed yet (spft install does that)
 tool      : not installed yet (spft install gets it, or: spft tool)
@@ -153,7 +154,8 @@ Rules that avoid problems:
 
    ```
    >> [2/4] arm64 + x86_64 libraries
-      checking what has to be installed (one quick check) ...
+      checking what has to be installed (up to a minute on a slow tablet; the bar moves while it works) ...
+      [====================] 0m23s - done
       77 packages to install
       downloading 77 files, 38.2 MB. apt names each file below, and a progress line follows every 5 seconds.
    Get:1 http://deb.debian.org/debian trixie/main arm64 libx11-6 ...
@@ -164,7 +166,15 @@ Rules that avoid problems:
       ... unpacking and setting up the packages: still working (1m20s)
    ```
 
-   So the screen keeps moving: a counter for every download (MB, percent, files), a counter `[12/77]` while packages are unpacked, and a `... still working (1m20s)` line every 20 seconds when there is nothing else to say. **A quiet screen is not a hang.** If really nothing new appears for 10 minutes, press Ctrl+C and run `bash ~/spft/install.sh` again: it carries on, and what was already downloaded is kept. If it stops with an error it says in which step (`The setup stopped in step: ...`).
+   So the screen keeps moving:
+   - while apt checks what is missing, a small **bar moves along one line** and counts the time (`[      =====         ] 0m12s`); when the check is done it fills up and says `done`. (If the output is not a terminal, a `... still working` line comes every 5 seconds instead.)
+   - a counter for every download (MB, percent, files),
+   - a counter `[12/77]` while packages are unpacked,
+   - and a `... still working (1m20s)` line every 20 seconds when there is nothing else to say.
+
+   **A quiet screen is not a hang.** If really nothing new appears for 10 minutes, press Ctrl+C and run `bash ~/spft/install.sh` again: it carries on, and what was already downloaded is kept. If it stops with an error it says in which step (`The setup stopped in step: ...`).
+
+   **Red or yellow warnings during the install are normal.** Lines with `Exec format error` (Debian tried to run a small x86_64 helper program before box64 was installed), or `systemctl: command not found` and `Restarting systemd-binfmt failed` (this Debian has no systemd, and spft does not need what box64 would register there) are harmless. spft prints a `Note:` under them that says so.
 5. At the end you see `done. Start SP Flash Tool with:  spft`.
 6. Check everything with:
 
@@ -184,7 +194,7 @@ In Termux type:
 spft
 ```
 
-The Termux:X11 app opens, turns to landscape, goes fullscreen and zooms in a little, and the SP Flash Tool window appears. spft keeps the phone awake while the tool runs.
+The Termux:X11 app opens, turns to landscape, goes fullscreen and zooms in as far as the whole tool window still fits on your screen (spft reads the screen size: about 105% on a 1280x800 tablet, 145% on a phone that is 1080 pixels wide), and the SP Flash Tool window appears. spft keeps the phone awake while the tool runs.
 
 - Press the Android **Back** button to show or hide the on-screen keyboard (you need it to type a folder name).
 - Tap = click, double tap = double click, two-finger tap = right click.
@@ -196,12 +206,12 @@ Screen options (usually not needed):
 | Command | Effect |
 |---|---|
 | `spft x11 reverse` | Landscape the other way up (when the picture is upside down) |
-| `spft x11 zoom=170` | Bigger or smaller (30 to 300, default 150) |
+| `spft x11 zoom=N` | Size in percent (30 to 300), for example `zoom=120`. Without it spft uses `zoom=auto`: the biggest zoom at which the whole tool window still fits. A bigger one cuts off the bottom of the window (the buttons and the status bar). |
 | `spft x11 portrait` | Do not force landscape |
 | `spft x11 plain` | Do not change the Termux:X11 settings at all |
 | `spft x11 reset` | Put the Termux:X11 settings back as they were before spft |
 | `spft vnc` | Use a VNC desktop instead of Termux:X11 (slower). Viewer app: `localhost:5901`, password `spft1234` |
-| `spft stop` | Close the tool. **Never while it is flashing.** |
+| `spft stop` | **Force-stop everything of spft:** the tool and every other program in Debian, the Termux:X11 server and the Termux:X11 app. Then it unmounts Debian and **clears the caches** (Debian's `/tmp` and `~/.cache`, the Termux:X11 app's cache, the phone's memory cache) and says how much it freed. Your files, the tool itself and the downloads are not touched. **Never while it is flashing.** |
 
 ## 5. Where are my files? (internal storage)
 
@@ -227,7 +237,7 @@ The same rule works for every folder: `Internal storage/Firmware/MT6765` in the 
 
 4. The folder opens. Click your file, then **Open**.
 
-Shortcut: in the list on the left click **root**. You will find the folders `sdcard` and `Download` there.
+**The file window starts in your internal storage.** In the list on the left it shows **sdcard**, which is your internal storage (and *Computer*, which is Debian's own root, that you do not need). Click **sdcard** to get back to the top of your storage at any time. (Older versions of spft showed a folder called *root* there, which confused people. If you prefer that, `SPFT_STORAGE=off spft` brings it back.)
 
 **Tips that avoid "file not found"**
 
@@ -318,12 +328,15 @@ Common problems with spft itself:
 | `pkg could not install ...` | Run `termux-change-repo`, pick another mirror, and run the install again. |
 | `the Termux:X11 server did not start` | Install the **Termux:X11 app** (not only the package, [section 2](#2-install-the-apps)) and open it once. |
 | `x11-app : NOT installed`, but the app is installed | An older spft could not see other apps on Android 11 and newer (Android hides them from Termux) and said so by mistake. Run `spft update`: spft now asks root, which sees every app. It does not matter whether the app is from F-Droid or from GitHub. |
-| The install seems stuck at `arm64 + x86_64 libraries` | It is the longest part and it is working: look for the counters and the `still working` lines ([section 3](#3-install-spft-one-time)). If nothing new appears for 10 minutes, press Ctrl+C and run `bash ~/spft/install.sh` again. |
+| The install seems stuck at `arm64 + x86_64 libraries` | It is the longest part and it is working: look for the moving bar (`checking what has to be installed`), the counters and the `still working` lines ([section 3](#3-install-spft-one-time)). If nothing new appears for 10 minutes, press Ctrl+C and run `bash ~/spft/install.sh` again. |
+| **Red or yellow** lines during the install: `Exec format error`, `systemctl: command not found`, `Restarting systemd-binfmt failed` | Harmless, and spft says so with a `Note:` under them. Debian tried to run a small x86_64 program before box64 was there, and it has no systemd. Neither is needed. Keep waiting. |
+| The bottom of the tool window is cut off (no buttons, no status bar), or its lower rows cannot be reached | The screen is too small for the zoom. Run `spft update` (the zoom now fits itself to your screen), or try a smaller one, for example `spft x11 zoom=100`. `spft check` shows what spft chose (`screen` row). |
 | The tool says `Invalid linux kervel version. Please upgrade linux kernel up to at least 4.19.14!` | The tool misspells *kernel*. On kernels 4.19.100 to 4.19.139 it says this by mistake, and spft handles it itself when it starts the tool (run `spft update` for the newest version). On a kernel older than 4.19.14 it may say this too: see [the details](docs/TROUBLESHOOTING.md#the-invalid-linux-kernel-version-message). |
 | A **red** `[BOX64] Error: ... is not an executable file` during the install | A bug in older versions of spft: its self-test picked a text file instead of the test program. Run `spft update` and `spft install`. |
 | Lines like `Cannot dlopen` or `Error loading needed lib` when the tool starts | Normal: box64 mentions libraries it could not load and goes on. Only a red `[BOX64]` in front of `Error:` is a real problem. |
-| Black screen in Termux:X11 | Run `spft stop` (it also stops the Termux:X11 server and removes a socket file that an old server left behind), close Termux:X11 from Recents, then run `spft` again. |
+| Black screen in Termux:X11 | Run `spft stop` (it force-stops the tool, the Termux:X11 server and the Termux:X11 app, removes a socket file that an old server left behind, and clears the caches), then run `spft` again. |
 | `SP Flash Tool is already running` | The tool is open in the background. Switch to Termux:X11, or run `spft stop`. |
+| The file window shows a folder called *root* and not your storage | You have an older spft. Run `spft update`: the file windows now start in your internal storage (**sdcard**). |
 | `box64 self-test FAILED` | Run `spft install` again. If it fails again, this phone cannot run the emulator. |
 | The tool closes or Termux disappears by itself | See [Android 12 and newer](#android-12-and-newer). |
 | The device is never detected | Try another OTG adapter and cable. Press **Download** first, then connect. While the target is connected, `spft enter 'ls /dev/ttyACM*'` should list a device (in preloader mode it is there for only a few seconds). |
@@ -386,9 +399,9 @@ Also set *Settings > Apps > Termux > Battery* (and the same for Termux:X11) to *
 | Command | What it does |
 |---|---|
 | `spft` | Start SP Flash Tool (same as `spft x11`) |
-| `spft x11 [options]` | Start it on Termux:X11. Options: `reverse`, `portrait`, `zoom=N`, `keys`, `plain`, `reset` |
+| `spft x11 [options]` | Start it on Termux:X11. Options: `reverse`, `portrait`, `zoom=N` (default: `auto`, fits your screen), `keys`, `plain`, `reset` |
 | `spft vnc` | Start it on a VNC desktop instead |
-| `spft stop` | Close the tool and the Termux:X11 server. Never while it flashes. |
+| `spft stop` | Force-stop everything of spft (the tool, all programs in Debian, the Termux:X11 server and app), unmount, and clear the caches. Never while it flashes. |
 | `spft tool [FILE\|URL\|NAME]` | Install or change SP Flash Tool. `spft tool list` shows the versions. |
 | `spft check` | Test the phone and the setup, with a hint for every problem |
 | `spft update` | Get the newest spft (`git pull`) and apply it |

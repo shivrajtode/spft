@@ -111,6 +111,27 @@ if [ -f "$LIBDIR/kernelfix.sh" ] && [ -f "$LIBDIR/kernelfix.so.b64" ]; then
   fi
 fi
 
+# The tool's file windows list the user's "home" folder in their side bar, and open in it. In Debian that is /root, which
+# means nothing to someone who is looking for a firmware file. So the tool is started with the phone's internal storage as
+# its home, and the side bar says "sdcard". Only the tool sees this change: its own settings and caches stay in /root
+# (the XDG folders say so), and the window manager was started above, before the change.
+#   SPFT_STORAGE=auto (default)   /sdcard
+#   SPFT_STORAGE=off              leave home as it is (/root)
+#   SPFT_STORAGE=/some/folder     that folder
+store=${SPFT_STORAGE:-auto}
+if [ "$store" = auto ]; then store=/sdcard; fi
+if [ "$store" != off ]; then
+  if [ -d "$store" ]; then
+    export XDG_CONFIG_HOME=${XDG_CONFIG_HOME:-${HOME:-/root}/.config}
+    export XDG_CACHE_HOME=${XDG_CACHE_HOME:-${HOME:-/root}/.cache}
+    export XDG_DATA_HOME=${XDG_DATA_HOME:-${HOME:-/root}/.local/share}
+    export HOME=$store
+    echo "file windows: start in $store (the phone's internal storage). To turn this off: SPFT_STORAGE=off spft"
+  else
+    echo "(the folder $store is not there, so the file windows start in ${HOME:-/root})"
+  fi
+fi
+
 echo "box64 prints a few 'Cannot dlopen' / 'Error loading needed lib' lines at the start. They are normal."
 echo "Only a red BOX64 in front of 'Error:' is a real problem."
 echo "starting SP Flash Tool from $d (Ctrl+C to stop)"
