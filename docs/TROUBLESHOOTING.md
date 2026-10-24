@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Back to the [README](../README.md).
+Back to the [README](../README.md), or to the [Guide](GUIDE.md).
 
 **Always start with `spft check`.** It tests the host phone and the setup and says what to do for every problem.
 
@@ -10,7 +10,7 @@ Back to the [README](../README.md).
 4. [Problems with spft itself](#problems-with-spft-itself)
 5. [Start again from zero](#start-again-from-zero)
 
-Not sure that a phone can be the host at all? [Check it without installing spft](../README.md#check-a-phone-first-no-install).
+Not sure that a phone can be the host at all? [Check it without installing spft](GUIDE.md#check-a-phone-first-no-install).
 
 ## SP Flash Tool error codes
 
@@ -116,7 +116,7 @@ kernel 4.19.127: SP Flash Tool v5 refuses kernels like this one by mistake (it s
 | `could not download Debian` | No internet, or GitHub is not reachable. | Check the connection and run `spft install` again. A broken download is deleted, so each try starts from the beginning. |
 | `the arm64 Debian won't run on this phone: ...` | The kernel or ROM blocks chroot. | Run `spft check`. Another host phone may be needed. |
 | `box64 self-test FAILED` | The emulator does not run on this phone. | Run `spft install` again. If it fails again, use another host phone. |
-| `the Termux:X11 server did not start` | The Termux:X11 **app** is missing (the `termux-x11-nightly` package alone is not enough). | Install the app ([README, section 2](../README.md#2-install-the-apps)), open it once, run `spft` again. |
+| `the Termux:X11 server did not start` | The Termux:X11 **app** is missing (the `termux-x11-nightly` package alone is not enough). | Install the app ([Guide, section 2](GUIDE.md#2-install-the-apps)), open it once, run `spft` again. |
 | `x11-app : NOT installed`, but the app is installed | An older spft asked Android for the list of apps as the normal Termux user. Since Android 11 a normal app is not shown the other apps, so Termux:X11 was missing from the list. | `spft update`. spft now asks root first, which sees every app (it reads `/data/system/packages.list`). The app can come from F-Droid or from GitHub: spft only looks that it is installed. |
 | The install seems stuck at `arm64 + x86_64 libraries` | It is the longest part (about 90 packages), and older versions of spft printed nothing for minutes while apt worked. | Look at the screen: a bar that moves (`[      =====         ] 0m12s`, while apt checks what is missing), counters like `downloaded 14.2 of 38.2 MB (37%)` and `[12/77]`, or a `still working` line every 20 seconds, mean that it is busy. If **nothing** new appears for 10 minutes, press Ctrl+C and run `bash ~/spft/install.sh` again: it carries on and keeps the downloaded files. |
 | **Red or yellow** lines during the install: `Exec format error`, `systemctl: command not found`, `Restarting systemd-binfmt failed` | `Exec format error`: while it sets up an x86_64 library Debian runs a small x86_64 helper program of that library, and that cannot work before box64 is there. The other two: this Debian has no systemd, so box64's package cannot register itself there. spft does not need any of it, because it starts the tool with `box64 ./flash_tool` itself. | **Nothing, keep waiting.** spft prints a `Note:` under these lines that says so. Only `The setup stopped in step: ...` is an error. |
@@ -131,12 +131,12 @@ kernel 4.19.127: SP Flash Tool v5 refuses kernels like this one by mistake (it s
 | **The bottom of the tool window is cut off**: no buttons, no status bar, the lower rows cannot be reached | The zoom was too big for the screen. The tool's window is about 720 pixels tall and cannot be made smaller, and the Termux:X11 screen is only as tall as the short side of the phone divided by the zoom. The old fixed zoom of 150% gave a 1280x800 tablet a screen of only 533 pixels. | `spft update`: spft now reads the screen size and picks the biggest zoom at which the whole window fits (105 on a 1280x800 tablet). `spft check` shows it in the `screen` row. If it is still cut off, take a smaller one: `spft x11 zoom=100`, then `zoom=90`, until the whole window shows. |
 | The tool window is too small (tiny writing) | Your screen is large, or the zoom is low on purpose. | `spft x11 zoom=130` or `zoom=170` (bigger). Above the zoom that the `screen` row of `spft check` names, the bottom of the window is cut off. |
 | `SP Flash Tool is already running` | A copy is open in the background. | Switch to Termux:X11, or run `spft stop`. |
-| `SP Flash Tool is not installed yet` | The tool download did not finish. | `spft tool` ([README](../README.md#if-the-download-fails)). |
-| `checksum mismatch` | The site re-packed the zip, or the download was damaged. | Download it by hand ([README](../README.md#if-the-download-fails)). |
-| The tool or Termux closes by itself | Android's background process killer (Android 12 and newer). | [README, Android 12 and newer](../README.md#android-12-and-newer) |
+| `SP Flash Tool is not installed yet` | The tool download did not finish. | `spft tool` ([Guide](GUIDE.md#if-the-download-fails)). |
+| `checksum mismatch` | The site re-packed the zip, or the download was damaged. | Download it by hand ([Guide](GUIDE.md#if-the-download-fails)). |
+| The tool or Termux closes by itself | Android's background process killer (Android 12 and newer). | [Guide, Android 12 and newer](GUIDE.md#android-12-and-newer) |
 | The file window starts in a folder called *root* (with *Computer* above it) and not in *sdcard* | An older spft. Its file windows started in Debian's home folder, `/root`, one click away from the phone's storage. | `spft update`. Now the tool is started with your internal storage as its home folder, and the window starts there (`SPFT_STORAGE=off spft` brings the old behaviour back). Click **sdcard** in the list on the left to come back to the top of your storage. |
-| The file window shows no files | Wrong folder name, or the files are on the SD card. | Names are case sensitive. Only internal storage is visible. [README, section 5](../README.md#5-where-are-my-files-internal-storage) |
-| `spft update` says it was not made with git clone | The folder is a copy, not a clone. | Clone again ([README, section 3](../README.md#3-install-spft-one-time)). |
+| The file window shows no files | Wrong folder name, or the files are on the SD card. | Names are case sensitive. Only internal storage is visible. [Guide, section 5](GUIDE.md#5-where-are-my-files-internal-storage) |
+| `spft update` says it was not made with git clone | The folder is a copy, not a clone. | Clone again (the install line in the [README](../README.md#step-2-install-spft-one-time)). |
 
 ## Start again from zero
 

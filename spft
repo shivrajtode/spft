@@ -3,7 +3,7 @@
 # (Termux + a root Debian arm64 chroot + box64 + the Termux:X11 display.)
 #
 #   spft help     lists the commands.
-#   README.md     has the step-by-step guide.
+#   README.md     has the short start; docs/GUIDE.md has the step-by-step guide.
 #
 # Run it from Termux as a normal user. It calls su itself when it needs root.
 set -eu
@@ -505,7 +505,7 @@ tool_help() { # tool_help NAME   what to do when the automatic download did not 
 >> SP Flash Tool could not be downloaded automatically (no connection, or the mirror is down or has changed).
    Do it by hand instead - it takes a minute:
    1. In your phone's browser download  SP_Flash_Tool_$1_Linux.zip  - the LINUX build, not the Win one.
-      Where to get it is listed in the README ("If the download fails").
+      Where to get it: https://spflashtools.com/category/linux (more in the Guide on GitHub, docs/GUIDE.md, "If the download fails").
    2. Leave it in your Download folder.
    3. In Termux run:  spft tool
 EOF
@@ -630,7 +630,7 @@ root_check() {
   case $sdk in
     '' | *[!0-9]*) ;;
     *) if [ "$sdk" -ge 31 ]; then
-      limit "Android 12 or newer: Android may kill background processes. If SP Flash Tool or Termux closes by itself, see the README, section \"Android 12 and newer\"."
+      limit "Android 12 or newer: Android may kill background processes. If SP Flash Tool or Termux closes by itself, see the Guide on GitHub (docs/GUIDE.md), section \"Android 12 and newer\"."
     fi ;;
   esac
   echo

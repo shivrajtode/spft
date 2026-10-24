@@ -33,7 +33,25 @@ case "$1 $2" in
       *"-q .id"*) echo 583231 ;;
     esac ;;
   "repo view") [ -d "$TT/remotes/$3.git" ] ;;
+  "api repos/"*"/topics")      # how many topics the repository has (the answer can be refused: $TT/api-fails)
+    [ ! -e "$TT/api-fails" ] || exit 1
+    f="$TT/meta/${2#repos/}"; f="${f%/topics}"
+    if [ -s "$f/topics" ]; then tr ',' '\n' < "$f/topics" | grep -c .; else echo 0; fi ;;
+  "api repos/"*)               # the description of the repository
+    [ ! -e "$TT/api-fails" ] || exit 1
+    cat "$TT/meta/${2#repos/}/description" 2>/dev/null; true ;;
+  "repo edit")
+    d="$TT/meta/$3"; mkdir -p "$d"; shift 3
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --description) printf '%s' "$2" > "$d/description"; shift 2 ;;
+        --add-topic) printf '%s' "$2" > "$d/topics"; shift 2 ;;
+        *) echo "gh stand-in: unexpected edit option $1" >&2; exit 1 ;;
+      esac
+    done ;;
   "repo create")
+    d="$TT/meta/$3"; mkdir -p "$d"
+    prev=""; for a in "$@"; do if [ "$prev" = --description ]; then printf '%s' "$a" > "$d/description"; fi; prev=$a; done
     mkdir -p "$TT/remotes/$(dirname "$3")"
     git init -q --bare "$TT/remotes/$3.git"
     git --git-dir="$TT/remotes/$3.git" symbolic-ref HEAD refs/heads/main    # like GitHub: the default branch is main
@@ -74,6 +92,10 @@ sed_t < "$T/out"; echo "exit=$rc"
 [ "$rc" = 0 ] && ok "exit 0" || bad "exit status $rc"
 has "$LOG" '^gh auth login' "asks GitHub to log in"
 has "$LOG" '^gh repo create octocat/spft --public' "creates a public repository named after the user"
+has "$LOG" '^gh repo create octocat/spft .*--description SP Flash Tool (MediaTek)' "the new repository gets a description"
+has "$LOG" '^gh repo edit octocat/spft --add-topic sp-flash-tool,mediatek,mtk' "its topics are added (it had none)"
+has "$T/out" 'topics: added' "the output says that the topics were added"
+[ "$(tr ',' '\n' < "$T/meta/octocat/spft/topics" | grep -c .)" -ge 8 ] && ok "at least 8 topics were stored" || bad "too few topics"
 has "$T/out" 'git clone https://github.com/octocat/spft ~/spft && bash ~/spft/install.sh' "prints the one-line install command with the real name"
 has "$T/out" 'bash <(curl -fsSL https://raw.githubusercontent.com/octocat/spft/main/check.sh)' "prints the check-only line with the real name"
 [ -d "$T/remotes/octocat/spft.git" ] && ok "the repository exists on 'GitHub'" || bad "no repository was created"
@@ -105,6 +127,8 @@ has "$T/out" 'nothing new to commit' "no empty commit"
 has "$T/out" 'exists already - pushing' "recognises the existing repository"
 ! grep -q '^gh repo create' "$LOG" && ok "does not try to create it again" || bad "tried to create the repository again"
 ! grep -q '^gh auth login' "$LOG" && ok "does not log in again" || bad "logged in again"
+! grep -q '^gh repo edit' "$LOG" && ok "does not edit the description or the topics again" || bad "edited the repository page again"
+has "$T/out" 'topics: already there, kept' "the output says that the topics are kept"
 
 echo; echo "=== 3. a change is committed and pushed"
 echo "one more line" >> "$T/proj/docs/placeholder-test.md"
@@ -112,6 +136,21 @@ run "$T/proj" > "$T/out" 2>&1; rc=$?
 [ "$rc" = 0 ] && ok "exit 0" || bad "exit status $rc"
 (g -C "$T/clone" pull -q 2>/dev/null; g -C "$T/clone" log --oneline | wc -l | tr -d ' ') | grep -q '^2$' && ok "the clone sees the second commit" || bad "second commit not pushed"
 
+echo; echo "=== 3b. a description and topics that you set on github.com are kept; if GitHub does not answer, nothing is overwritten"
+printf '%s' "my own words" > "$T/meta/octocat/spft/description"; printf '%s' "foo,bar,baz" > "$T/meta/octocat/spft/topics"
+: > "$LOG"; echo "another line" >> "$T/proj/docs/placeholder-test.md"
+run "$T/proj" > "$T/out" 2>&1; rc=$?
+[ "$rc" = 0 ] && ok "exit 0" || bad "exit status $rc"
+! grep -q '^gh repo edit' "$LOG" && ok "no edit call when description and topics exist" || bad "edited a page that the owner had filled in"
+[ "$(cat "$T/meta/octocat/spft/description")" = "my own words" ] && [ "$(cat "$T/meta/octocat/spft/topics")" = "foo,bar,baz" ] && ok "your description and your topics are as you left them" || bad "the owner's page was changed"
+: > "$T/meta/octocat/spft/description"; : > "$T/meta/octocat/spft/topics"; : > "$T/api-fails"
+: > "$LOG"; echo "and one more line" >> "$T/proj/docs/placeholder-test.md"
+run "$T/proj" > "$T/out" 2>&1; rc=$?
+[ "$rc" = 0 ] && ok "exit 0 although GitHub did not answer the questions about the page" || bad "exit status $rc"
+! grep -q '^gh repo edit' "$LOG" && ok "nothing is edited when the page could not be read (an empty answer is not the same as no answer)" || bad "edited a page that could not be read"
+has "$T/out" 'could not read the repository page' "it says so"
+rm -f "$T/api-fails"
+g -C "$T/clone" pull -q 2>/dev/null
 echo; echo "=== 4. another repository name"
 newproj "$T/proj2"
 run "$T/proj2" my-flasher > "$T/out" 2>&1; rc=$?
@@ -148,7 +187,7 @@ has "$T/out" 'GitHub has changes that are not in this folder yet' "it says that 
 has "$T/out" 'Add acknowledgment for a friend in README' "and shows the change that it keeps"
 g -C "$T/clone" pull -q 2>/dev/null
 has "$T/clone/README.md" '^And special thanks to my friend, for the guide\.$' "the edit made on GitHub is still there"
-has "$T/clone/README.md" '^# spft - SP Flash Tool on an Android phone (local edit)$' "and the change made here arrived on GitHub"
+head -n 1 "$T/clone/README.md" | grep -q ' (local edit)$' && ok "and the change made here arrived on GitHub" || bad "the change made here did not arrive on GitHub"
 has "$T/proj/README.md" '^And special thanks to my friend, for the guide\.$' "the edit also reached this folder"
 g -C "$T/clone" log --merges --format=%s | grep -q 'Merge the changes made on GitHub' && ok "one merge commit joins the two" || bad "no merge commit"
 

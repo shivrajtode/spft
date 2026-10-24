@@ -555,7 +555,7 @@ spft can NOT run on this device, because:
 == Result ==
 spft can be installed and started on this device.
 Keep in mind:
- - Android 12 or newer: Android may kill background processes. If SP Flash Tool or Termux closes by itself, see the README, section "Android 12 and newer".
+ - Android 12 or newer: Android may kill background processes. If SP Flash Tool or Termux closes by itself, see the Guide on GitHub (docs/GUIDE.md), section "Android 12 and newer".
 -- the screen row: a tablet (1280x800), a phone whose size was overridden, and a phone that will not say
 screen    : 1280x800 pixels - spft x11 picks zoom 105%, a Termux:X11 screen 761 pixels tall (the tool's window needs about 720)
 screen    : 720x1600 pixels - spft x11 picks zoom 95%, a Termux:X11 screen 757 pixels tall (the tool's window needs about 720)
@@ -568,7 +568,7 @@ spft can NOT run on this device, because:
 Keep in mind:
  - the kernel (3.18.71) is older than the 4.19.14 that SP Flash Tool v5 asks for, so the tool may stop with "Invalid linux kernel version" (try it first; if it does, SPFT_FAKE_KERNEL=5.4.0 spft shows it another version - your own risk; mtkclient has no such limit)
  - this kernel has no cdc_acm driver (CONFIG_USB_ACM), so SP Flash Tool can't talk to a device from this phone. spft still installs and starts here, which is enough to try it out; to flash, use a phone whose kernel has the driver (or mtkclient)
- - Android 12 or newer: Android may kill background processes. If SP Flash Tool or Termux closes by itself, see the README, section "Android 12 and newer".
+ - Android 12 or newer: Android may kill background processes. If SP Flash Tool or Termux closes by itself, see the Guide on GitHub (docs/GUIDE.md), section "Android 12 and newer".
 -- the check is only a read: it changed nothing in Debian
 ok: no marker written
 

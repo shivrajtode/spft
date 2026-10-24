@@ -31,10 +31,12 @@ lib/gui.sh          runs INSIDE Debian: the VNC desktop for `spft vnc`
 lib/kernelfix.sh    which kernels SP Flash Tool v5 turns away by mistake, and what to show it instead
 lib/kernelfix.so.b64  the tiny library that shows it that (base64 text); built from tools/kernelfix.s
 tools/publish.sh    puts this project on your GitHub account
+tools/make-assets.py  draws the pictures in assets/ (only needed if you want to change them)
 tools/kernelfix.s   source of that library (x86-64 assembly, no libc)
 tools/build-kernelfix.sh  rebuilds lib/kernelfix.so.b64 from it
 tests/              automatic tests: bash tests/run_all.sh
-docs/               these pages
+docs/               GUIDE.md (every step), TROUBLESHOOTING.md (errors), HOW-IT-WORKS.md (this page)
+assets/             the pictures of the README (SVG), social-preview.png for the repository's share card, and a note on changing them
 ```
 
 ## Files that spft creates
@@ -219,8 +221,8 @@ You rarely need these. Set them in front of the command, for example `SPFT_MIN_M
 | `t_provision.sh` | `lib/provision.sh` with a stand-in `apt-get`: the progress display (the moving bar on a real terminal, driven through a pty, and the lines that stand in for it elsewhere; counters, percent, `still working` lines), the notes under the harmless warnings, background loops that end with the script, the `dpkg --configure -a` repair, unknown package names, no internet, the self-test choosing the real program and not the text file, a broken box64, building box64 from source, a half-downloaded file |
 | `t_check.sh` | `check.sh`: the download, another repository or branch, bad names, a failed or damaged download, running from a copy of the repository, as root, outside Termux, root refused, piped into bash |
 | `t_kernelfix.sh` | the kernel-version fix: which kernels are affected, what is shown, the library's structure, that it matches its source, and (on x86-64 Linux) the library loaded into real programs |
-| `t_publish.sh` | `tools/publish.sh` against a stand-in GitHub: first publish, run again, another name, refusals, GitHub being ahead (an edit made on github.com is kept, also when the update carries the same line; a change to the same line stops it without pushing), an empty repository, and that the published copy (your name filled in) still passes `t_docs.sh` |
-| `t_docs.sh` | the documentation: every link and `#anchor` inside the repository works, every command of `spft help` is in the README, the install line is the same everywhere (with the placeholder, or with your name after publishing) |
+| `t_publish.sh` | `tools/publish.sh` against a stand-in GitHub: first publish, run again, another name, the repository's description and topics (set only when they are empty), refusals, GitHub being ahead (an edit made on github.com is kept, also when the update carries the same line; a change to the same line stops it without pushing), an empty repository, and that the published copy (your name filled in) still passes `t_docs.sh` |
+| `t_docs.sh` | the documentation: every link and `#anchor` inside the repository works, every command of `spft help` is in the Guide, the install line is the same everywhere (with the placeholder, or with your name after publishing), the README is short and keeps its sections and credits, and the pictures in `assets/` are well-formed and safe (no scripts, nothing loaded from other websites) |
 
 `t_run.sh` and `t_host.sh` print what happened, and the output is compared with the saved copy in `tests/expected/`. After a change you made on purpose, run `bash tests/run_all.sh --update` and look at the diff in git.
 

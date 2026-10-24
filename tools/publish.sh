@@ -9,7 +9,8 @@
 # If you are not logged in to GitHub yet it starts the login: a code is shown, you type it on
 # https://github.com/login/device in your browser.
 #
-# It also writes your GitHub name into the README (the places that say YOUR-GITHUB-NAME).
+# It also writes your GitHub name into the README and the guides (the places that say YOUR-GITHUB-NAME), and fills in
+# the repository's description and topics when they are empty (what you set yourself is never changed).
 #
 # Running it again after an update is safe. If you edited a file on github.com after the last publish (a thank-you
 # line in the README, say), your edit is kept: GitHub's newer changes are merged in before anything is pushed. Only
@@ -18,6 +19,8 @@ set -eu
 
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 name=${1:-spft}
+DESC="SP Flash Tool (MediaTek) on a rooted Android phone or tablet: Termux + Debian chroot + box64 + Termux:X11"
+TOPICS="sp-flash-tool,mediatek,mtk,unbrick,android,termux,termux-x11,box64,debian,chroot,rooted-phone"
 die() { echo "publish: $*" >&2; exit 1; }
 say() { printf '\n>> %s\n' "$*"; }
 
@@ -86,8 +89,33 @@ if gh repo view "$owner/$name" >/dev/null 2>&1; then
   git push -u origin main
 else
   echo "creating the repository (public: others must be able to clone it)"
-  gh repo create "$owner/$name" --public --source . --remote origin --push \
-    --description "SP Flash Tool (MediaTek) on a rooted Android phone or tablet: Termux + Debian chroot + box64 + Termux:X11"
+  gh repo create "$owner/$name" --public --source . --remote origin --push --description "$DESC"
+fi
+
+say "repository page: description and topics"
+# Only what is empty is filled in, and only when GitHub could be asked: a description or topics that you set on
+# github.com yourself are never changed or removed. Nothing in this step can stop the publish.
+if cur=$(gh api "repos/$owner/$name" -q '.description // ""' 2>/dev/null); then
+  if [ -n "$cur" ]; then
+    echo "description: already there, kept"
+  elif gh repo edit "$owner/$name" --description "$DESC" >/dev/null 2>&1; then
+    echo "description: set"
+  else
+    echo "(could not set the description - you can add it on github.com)"
+  fi
+else
+  echo "(could not read the repository page - description left alone)"
+fi
+if n=$(gh api "repos/$owner/$name/topics" -q '.names | length' 2>/dev/null); then
+  if [ "$n" != 0 ]; then
+    echo "topics: already there, kept"
+  elif gh repo edit "$owner/$name" --add-topic "$TOPICS" >/dev/null 2>&1; then
+    echo "topics: added ($TOPICS)"
+  else
+    echo "(could not add the topics - you can add them on github.com)"
+  fi
+else
+  echo "(could not read the topics - left alone)"
 fi
 
 cat <<DONE
@@ -99,6 +127,9 @@ Anyone with a rooted Android phone can now install it in Termux with this one li
   pkg update -y && pkg install -y git && git clone https://github.com/$owner/$name ~/spft && bash ~/spft/install.sh
 
 and start it afterwards by typing:  spft
+
+The picture that Telegram and other apps show when someone shares the link is assets/social-preview.png.
+GitHub cannot take it from the repository: upload it once on  github.com/$owner/$name > Settings > Social preview > Edit.
 
 To only CHECK a phone first (nothing is installed), they can paste this in Termux:
 
