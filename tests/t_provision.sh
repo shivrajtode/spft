@@ -8,7 +8,7 @@ set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 for c in awk sed grep find stat head sort install; do command -v $c >/dev/null || { echo "ABORT: $c is needed for this test"; exit 1; }; done
 T=$(mktemp -d "${TMPDIR:-/tmp}/spft-prov.XXXXXX")
-mkdir -p "$T/bin" "$T/root" "$T/tmp" "$T/etc/apt/sources.list.d" "$T/usr/share/keyrings" "$T/var/cache/apt/archives/partial" \
+mkdir -p "$T/bin" "$T/root" "$T/tmp" "$T/etc/apt/sources.list.d" "$T/etc/apt/apt.conf.d" "$T/usr/share/keyrings" "$T/var/cache/apt/archives/partial" \
          "$T/pkgtree/bin" "$T/pkgtree/usr/share/initramfs-tools/conf-hooks.d"
 LOG=$T/calls.log; : > "$LOG"
 fails=0
@@ -27,6 +27,12 @@ count() { grep -c -- "$1" "$LOG" || true; }
 #   FAKE_APT_BOX64=fail     installing box64-android fails (the repository is down)
 #   FAKE_APT_PLAN_SLOW=N    every dry run (install -s, --print-uris) takes N seconds, like apt reading a big package cache
 #   FAKE_APT_WARN=1         the real install prints the harmless warnings of the real packages (Exec format error, systemctl)
+#   FAKE_APT_FLAKY=update   the first `apt-get update` fails (exit 100) and the next one works: a connection that dropped
+#   FAKE_APT_SPAM=1         `install -d` starts with 60 lines "W: Tried to start delayed item ... but failed" (apt 3.0.3's bug)
+# Like the real apt it plans Mesa + LLVM (libllvm19, mesa-libgallium) for libgl1 / libegl1 of a CPU type for which no
+# graphics stand-in package (spft-gl-stub) is installed yet. dpkg -i of the stand-in package marks the type as covered.
+#   FAKE_STUB=fail          dpkg-deb cannot build the stand-in package
+# wget: FAKE_WGET=fail (exit 4) | corrupt (random content) ; FAKE_WGET_SLOW=SECONDS per file (times in $TT/wget-times)
 cat > "$T/bin/apt-get" <<'EOF'
 #!/bin/bash
 echo "apt-get $*" >> "$TLOG"
@@ -47,10 +53,23 @@ done
 ARCH=$TT/var/cache/apt/archives
 size=${FAKE_APT_SIZE:-200000}
 fname() { local p=$1 arch=arm64; case $p in *:amd64) arch=amd64 ;; esac; echo "${p%%:*}_1.0_$arch.deb"; }
-todo() { local p; for p in "${pk[@]}"; do grep -qxF "$p" "$TT/installed" 2>/dev/null || echo "$p"; done; }
+# what apt would add for libgl1 / libegl1 of a CPU type that has no graphics stand-in yet (Mesa and its LLVM)
+heavy() {
+  local p
+  for p in "${pk[@]}"; do
+    case $p in
+      libgl1 | libegl1) [ -e "$TT/stub-arm64" ] || echo "libllvm19 mesa-libgallium" ;;
+      libgl1:amd64 | libegl1:amd64) [ -e "$TT/stub-amd64" ] || echo "libllvm19:amd64 mesa-libgallium:amd64" ;;
+    esac
+  done | tr ' ' '\n' | sort -u
+}
+todo() { local p; for p in "${pk[@]}" $(heavy); do grep -qxF "$p" "$TT/installed" 2>/dev/null || echo "$p"; done; }
 case $sub in
   update)
     if [ "${FAKE_APT_FAIL:-}" = update ]; then echo "E: Failed to fetch http://deb.example/dists/trixie/InRelease  Temporary failure resolving 'deb.example'" >&2; exit 100; fi
+    if [ "${FAKE_APT_FLAKY:-}" = update ] && [ ! -e "$TT/flaky-done" ]; then
+      : > "$TT/flaky-done"; echo "E: Failed to fetch http://deb.example/dists/trixie/InRelease  Connection timed out" >&2; exit 100
+    fi
     echo "Get:1 http://deb.example/debian trixie InRelease [43.3 kB]"
     sleep "${FAKE_APT_SLOW:-0}"
     echo "Fetched 43.3 kB in 1s (60.1 kB/s)"
@@ -69,15 +88,22 @@ case $sub in
         echo "0 upgraded, $n newly installed, 0 to remove and 0 not upgraded."
       else
         echo "Reading package lists... Done"
-        for p in $(todo); do echo "'http://deb.example/pool/main/$(fname "$p")' $(fname "$p") $size SHA256:0000"; done
+        sha=$(head -c "$size" /dev/zero | sha256sum | cut -d' ' -f1)     # the stand-in wget writes $size zero bytes
+        for p in $(todo); do echo "'http://deb.example/pool/main/$(fname "$p")' $(fname "$p") $size SHA256:$sha"; done
       fi
       exit 0
     fi
     if [ "${FAKE_APT_BOX64:-}" = fail ]; then case " ${pk[*]} " in *" box64-android "*) echo "E: Unable to locate package box64-android" >&2; exit 100 ;; esac; fi
     if [ "$dl" = 1 ]; then
       k=0
+      if [ "${FAKE_APT_SPAM:-}" = 1 ]; then
+        for j in $(seq 1 60); do echo "W: Tried to start delayed item http://deb.example/debian trixie/main amd64 libxml2 amd64 2.12.7+dfsg+really2.9.14-2.1+deb13u3, but failed"; done
+      fi
       for p in $(todo); do
-        k=$((k + 1)); f=$(fname "$p")
+        f=$(fname "$p")
+        [ ! -f "$ARCH/$f" ] || continue          # a file that is there already is not fetched again (like the real apt)
+        k=$((k + 1))
+        echo "apt-fetched $f" >> "$TLOG"
         echo "Get:$k http://deb.example/debian trixie/main arm64 ${p%%:*} arm64 1.0 [$((size / 1000)) kB]"
         head -c $((size / 2)) /dev/zero > "$ARCH/partial/$f"; [ "$k" -gt 1 ] || sleep 1.5   # (the first file is slow: the progress line sees it half done)
         head -c "$size" /dev/zero > "$ARCH/partial/$f"; mv "$ARCH/partial/$f" "$ARCH/$f"
@@ -113,8 +139,22 @@ cat > "$T/bin/dpkg" <<'EOF'
 echo "dpkg $*" >> "$TLOG"
 case $1 in
   -x) cp -a "$TT/pkgtree/." "$3/" ;;
+  -i) case $2 in
+        */spft-stub/arm64.deb) : > "$TT/stub-arm64" ;;
+        */spft-stub/amd64.deb) : > "$TT/stub-amd64" ;;
+      esac ;;
 esac
 exit 0
+EOF
+# dpkg-deb --build [--root-owner-group] DIR OUT: keeps a copy of the control file (the test looks at it) and makes an empty OUT
+cat > "$T/bin/dpkg-deb" <<'EOF'
+#!/bin/bash
+echo "dpkg-deb $*" >> "$TLOG"
+[ "${FAKE_STUB:-}" != fail ] || { echo "dpkg-deb: error: could not make the package (simulated)" >&2; exit 2; }
+dir= out=
+for a in "$@"; do case $a in --*) ;; *) if [ -z "$dir" ]; then dir=$a; else out=$a; fi ;; esac; done
+cp "$dir/DEBIAN/control" "$TT/stub-control-$(basename "$dir")"
+: > "$out"
 EOF
 # box64: not installed until apt-get "installs" it; runs a program only when the file is executable and big, like the real one.
 #   FAKE_BOX64_BROKEN=1  it cannot run programs (an unsupported kernel or CPU, say)
@@ -130,7 +170,29 @@ case $1 in uname) echo x86_64 ;; esac
 EOF
 printf '#!/bin/bash\nexit 2\n' > "$T/bin/getent"
 for c in groupadd usermod; do printf '#!/bin/bash\necho "%s $*" >> "$TLOG"\n' "$c" > "$T/bin/$c"; done
-printf '#!/bin/bash\necho "wget $*" >> "$TLOG"\necho "-----BEGIN PGP PUBLIC KEY BLOCK-----"\n' > "$T/bin/wget"
+# wget: `wget -qO- URL` (the box64 key) prints a key; `wget -q -c ... -O FILE URL` writes FILE like a download of $FAKE_APT_SIZE bytes
+cat > "$T/bin/wget" <<'EOF'
+#!/bin/bash
+echo "wget $*" >> "$TLOG"
+out=
+args=("$@"); i=0
+while [ $i -lt ${#args[@]} ]; do
+  case ${args[$i]} in
+    -O) out=${args[$((i + 1))]}; i=$((i + 1)) ;;
+    -qO-) out=- ;;
+  esac
+  i=$((i + 1))
+done
+if [ "$out" = - ] || [ -z "$out" ]; then echo "-----BEGIN PGP PUBLIC KEY BLOCK-----"; exit 0; fi
+if [ -n "${FAKE_WGET_SLOW:-}" ]; then
+  echo "wget-start $$ $(date +%s.%N)" >> "$TT/wget-times"; sleep "$FAKE_WGET_SLOW"; echo "wget-end $$ $(date +%s.%N)" >> "$TT/wget-times"
+fi
+case ${FAKE_WGET:-} in
+  fail) exit 4 ;;
+  corrupt) head -c "${FAKE_APT_SIZE:-200000}" /dev/urandom > "$out" ;;
+  *) head -c "${FAKE_APT_SIZE:-200000}" /dev/zero > "$out" ;;
+esac
+EOF
 printf '#!/bin/bash\necho "gpg $*" >> "$TLOG"\ncat > /dev/null\nwhile [ $# -gt 0 ]; do [ "$1" = -o ] && : > "$2"; shift; done\n' > "$T/bin/gpg"
 # git / cmake / make: for the "build box64 from source" path
 printf '#!/bin/bash\necho "git $*" >> "$TLOG"\nmkdir -p "${@: -1}"\n' > "$T/bin/git"
@@ -154,17 +216,22 @@ make_script() { # make_script OUT [SOURCE]
       -e "s#/tmp/bbtest#$T/tmp/bbtest#g" \
       -e "s#/root/\\.spft-selftest-failed#$T/root/.spft-selftest-failed#g" \
       -e "s#/root/box64-src#$T/root/box64-src#g" \
+      -e "s#/root/spft-stub#$T/root/spft-stub#g" \
+      -e "s#/etc/apt/apt.conf.d#$T/etc/apt/apt.conf.d#g" \
+      -e "s#/etc/gai.conf#$T/etc/gai.conf#g" \
       -e "s#/etc/apt/sources.list.d#$T/etc/apt/sources.list.d#g" \
       -e "s#/usr/share/keyrings#$T/usr/share/keyrings#g" "${2:-$REPO/lib/provision.sh}" > "$1"
 }
 make_script "$T/provision.sh"
 # every Debian path that was meant to move has moved (a moved path has the work folder's name in front of it)
-if grep -n -E '(^|[^A-Za-z0-9_./-])/(var/cache/apt|tmp/bbtest|root/\.spft-selftest|root/box64-src|etc/apt/sources\.list\.d|usr/share/keyrings)' "$T/provision.sh"; then echo "NOTE: unreplaced absolute paths above"; fi
+if grep -n -E '(^|[^A-Za-z0-9_./-])/(var/cache/apt|tmp/bbtest|root/\.spft-selftest|root/box64-src|root/spft-stub|etc/apt/sources\.list\.d|etc/apt/apt\.conf\.d|etc/gai\.conf|usr/share/keyrings)' "$T/provision.sh" | grep -v '^[0-9]*:#'; then echo "NOTE: unreplaced absolute paths above"; fi
 
-fresh() { rm -rf "$T/installed" "$T/box64-installed" "$T/root/.spft-selftest-failed" "$T/root/box64-src" "$T/tmp/bbtest" \
-                 "$T/var/cache/apt/archives/"*.deb "$T/var/cache/apt/archives/partial/"* "$T/etc/apt/sources.list.d/"*; : > "$LOG"; }
+fresh() { rm -rf "$T/installed" "$T/box64-installed" "$T/root/.spft-selftest-failed" "$T/root/box64-src" "$T/root/spft-stub" "$T/tmp/bbtest" \
+                 "$T/var/cache/apt/archives/"*.deb "$T/var/cache/apt/archives/partial/"* "$T/etc/apt/sources.list.d/"* \
+                 "$T/etc/apt/apt.conf.d/"* "$T"/stub-arm64 "$T"/stub-amd64 "$T"/stub-control-* "$T/flaky-done" "$T/wget-times"
+          printf '# Configuration of getaddrinfo\n#precedence ::ffff:0:0/96  100\n' > "$T/etc/gai.conf"; : > "$LOG"; }
 run() { # run [VAR=value ...]   the script, with the stand-ins in front and short waiting times
-  env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T/root" TT="$T" TLOG="$LOG" SPFT_BEAT=1 SPFT_POLL=1 "$@" bash "$T/provision.sh"
+  env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T/root" TT="$T" TLOG="$LOG" SPFT_BEAT=1 SPFT_POLL=1 SPFT_RETRY_WAIT=0 "$@" bash "$T/provision.sh"
 }
 sed_t() { sed "s#$T#\$T#g"; }
 
@@ -192,7 +259,8 @@ has "$T/out" 'Debian is ready' "ends with the ready message"
 has "$LOG" '^dpkg --add-architecture amd64' "the amd64 architecture was added"
 n=$(grep -c -- 'install -s ' "$LOG" || true)
 [ "$n" -le 6 ] && ok "apt was asked what to install $n times in all (the old code asked once per library: about 90 times)" || bad "$n dry runs of apt-get"
-has "$LOG" 'apt-get .*Acquire::Retries=3' "apt is told to retry dropped downloads"
+has "$LOG" 'apt-get .*Acquire::Retries=0' "apt is told NOT to retry on its own (apt 3.0.3 floods the screen when it does)"
+hasnt "$LOG" 'Acquire::Retries=[1-9]' "and it is never told to retry"
 # the total: files and MB add up
 tot=$(grep -c . "$T/installed")
 [ "$tot" -gt 80 ] && ok "$tot packages were installed (arm64 and amd64 libraries, desktop, box64)" || bad "only $tot packages installed"
@@ -226,6 +294,8 @@ tail -n 5 "$T/out"; echo "exit=$rc"
 has "$T/out" 'Temporary failure resolving' "apt's own message is shown"
 has "$T/out" 'The setup stopped in step: base packages' "the step is named"
 has "$T/out" 'what was already downloaded is kept' "it says that downloads are kept"
+has "$T/out" 'attempt 4 of 4' "the step was tried 4 times before it gave up"
+n=$(grep -c ' update$' "$LOG" || true); [ "$n" = 4 ] && ok "apt-get update ran 4 times" || bad "apt-get update ran $n times"
 
 echo; echo "=== 5. the self-test takes the busybox PROGRAM, not the text file of the same name (it did once: red BOX64 error)"
 fresh
@@ -247,7 +317,7 @@ has "$T/out" 'box64 could not run' "says what failed"
 echo; echo "=== 7. no internet for the test program: the self-test says so"
 fresh
 sed -e 's#apt-get download busybox-static:amd64#false#' "$T/provision.sh" > "$T/provision-nodl.sh"
-env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T/root" TT="$T" TLOG="$LOG" SPFT_BEAT=1 SPFT_POLL=1 bash "$T/provision-nodl.sh" > "$T/out" 2>&1; rc=$?
+env -i PATH="$T/bin:/usr/bin:/bin" HOME="$T/root" TT="$T" TLOG="$LOG" SPFT_BEAT=1 SPFT_POLL=1 SPFT_RETRY_WAIT=0 bash "$T/provision-nodl.sh" > "$T/out" 2>&1; rc=$?
 tail -n 4 "$T/out"; echo "exit=$rc"
 has "$T/out" 'could not download the test program' "the failed download is explained"
 [ -e "$T/root/.spft-selftest-failed" ] && ok "failure marker written" || bad "no failure marker"
@@ -339,7 +409,7 @@ PYEOF
   [ "$shapes" -ge 3 ] && ok "and it moves ($shapes different positions)" || bad "the bar stands still ($shapes positions)"
   has "$T/out.tty" '^   \[====================\] [0-9]*m[0-9][0-9]s - done$' "it ends as a full bar that says done"
   n=$(grep -c '^   \[====================\] [0-9]*m[0-9][0-9]s - done$' "$T/out.tty" || true)
-  [ "$n" = 3 ] && ok "one bar for each of the 3 checks (base packages, libraries, box64)" || bad "$n finished bars instead of 3"
+  [ "$n" = 4 ] && ok "one bar for each of the 4 checks (wget, the other base packages, libraries, box64)" || bad "$n finished bars instead of 4"
   hasnt "$T/out.tty" 'checking what has to be installed: still working' "no timed lines in place of the bar on a terminal"
   n=$(grep '^   \[[ =]*\]' "$T/out.tty" | awk 'length($0) > 40' | wc -l)
   [ "$n" = 0 ] && ok "no line of the bar is longer than 40 characters (a phone held upright is about 45 wide; a longer line would wrap and could not be drawn over)" || bad "$n bar lines are longer than 40 characters"
@@ -351,7 +421,8 @@ PYEOF
   tail -n 5 "$T/out.tty"; echo "exit=$rc"
   [ "$rc" != 0 ] && ok "non-zero exit" || bad "exit status 0"
   has "$T/out.tty" 'E: Unable to locate package openbox' "apt's message is shown"
-  hasnt "$T/out.tty" '^   \[====================\] .* - done' "a failed check does not end with 'done'"
+  n=$(grep -c '^   \[====================\] [0-9]*m[0-9][0-9]s - done$' "$T/out.tty" || true)
+  [ "$n" = 1 ] && ok "a failed check does not end with 'done' (only the check before it, which worked, does)" || bad "$n finished bars (wanted 1: the check before the failing one)"
   has "$T/out.tty" 'The setup stopped in step: base packages' "and the step where it stopped is named"
 else
   echo "skipped: python3 is needed to run the script on a pseudo-terminal"
@@ -402,6 +473,127 @@ for p in /proc/[0-9]*; do   # never leave a stray loop behind, whatever happened
   case $c in "bash $T/provision.sh "*) kill -9 "${p#/proc/}" 2>/dev/null ;; esac
 done
 sleep 7   # the stand-in apt that was left running finishes by itself
+
+echo; echo "=== 16. the graphics stand-in: one for each CPU type, installed BEFORE apt plans the libraries, so Mesa and LLVM stay out"
+fresh
+run > "$T/out" 2>&1; rc=$?
+grep -n 'stand-in' "$T/out" | cut -c1-140; echo "exit=$rc"
+[ "$rc" = 0 ] && ok "exit 0" || bad "exit status $rc"
+has "$T/out" 'graphics stand-in for arm64 installed' "the arm64 stand-in is announced"
+has "$T/out" 'graphics stand-in for amd64 installed' "the amd64 stand-in is announced"
+has "$LOG" '^dpkg-deb --build --root-owner-group .*/spft-stub/arm64 ' "it is built with dpkg-deb --build --root-owner-group"
+has "$LOG" '^dpkg -i .*/spft-stub/arm64.deb' "and installed with dpkg -i"
+line() { grep -n -m1 -- "$1" "$LOG" | cut -d: -f1; }
+l_arm=$(line '^dpkg -i .*/spft-stub/arm64.deb'); l_first_apt=$(line '^apt-get ')
+[ -n "$l_arm" ] && [ -n "$l_first_apt" ] && [ "$l_arm" -lt "$l_first_apt" ] && ok "the arm64 stand-in comes before the first apt call" || bad "arm64 stand-in at line '$l_arm', first apt call at line '$l_first_apt'"
+l_add=$(line '^dpkg --add-architecture amd64'); l_amd=$(line '^dpkg -i .*/spft-stub/amd64.deb'); l_libs=$(line 'install -s .*libgl1')
+[ -n "$l_add" ] && [ -n "$l_amd" ] && [ -n "$l_libs" ] && [ "$l_add" -lt "$l_amd" ] && [ "$l_amd" -lt "$l_libs" ] &&
+  ok "the amd64 stand-in comes after dpkg --add-architecture amd64 and before the plan for the libraries" ||
+  bad "order: add-architecture line '$l_add', amd64 stand-in '$l_amd', libraries plan '$l_libs'"
+hasnt "$T/out" 'Note: apt also wants the Mesa' "no Mesa note: apt did not plan Mesa"
+if ! grep -qE '^(libllvm19|mesa-libgallium)(:amd64)?$' "$T/installed"; then ok "neither Mesa nor LLVM was installed, for arm64 or amd64"; else bad "Mesa or LLVM were installed"; fi
+has "$T/stub-control-arm64" '^Package: spft-gl-stub$' "the control file names the package"
+has "$T/stub-control-arm64" '^Architecture: arm64$' "arm64 stand-in: arm64"
+has "$T/stub-control-amd64" '^Architecture: amd64$' "amd64 stand-in: amd64"
+has "$T/stub-control-amd64" '^Multi-Arch: same$' "Multi-Arch: same (the two can be installed side by side)"
+has "$T/stub-control-arm64" '^Provides: libglx-vendor, libegl-vendor$' "it provides the two drivers that libglx0 and libegl1 ask for"
+real_deb=$(command -v dpkg-deb || true)
+if [ -n "$real_deb" ]; then
+  mkdir -p "$T/real/DEBIAN"; cp "$T/stub-control-amd64" "$T/real/DEBIAN/control"
+  if "$real_deb" --build --root-owner-group "$T/real" "$T/real.deb" > "$T/real.log" 2>&1 &&
+     [ "$("$real_deb" -f "$T/real.deb" Provides)" = "libglx-vendor, libegl-vendor" ] &&
+     [ "$("$real_deb" -f "$T/real.deb" Multi-Arch)" = same ] && [ "$("$real_deb" -c "$T/real.deb" | grep -c -v '/$' || true)" = 0 ]; then
+    ok "the real dpkg-deb builds the package from that control file; it has no files and the right fields"
+  else
+    bad "the real dpkg-deb refused the control file: $(cat "$T/real.log")"
+  fi
+else
+  echo "skipped: no dpkg-deb on this machine to check the control file against"
+fi
+
+echo; echo "=== 17. the stand-in cannot be built: Mesa is downloaded (slower), the setup still works, and it says why"
+fresh
+run FAKE_STUB=fail > "$T/out" 2>&1; rc=$?
+grep -n 'stand-in\|Note: apt also' "$T/out" | cut -c1-150; echo "exit=$rc"
+[ "$rc" = 0 ] && ok "exit 0: not being able to save 100 MB is no reason to stop" || bad "exit status $rc"
+has "$T/out" 'could not set up the graphics stand-in for arm64' "the arm64 failure is said"
+has "$T/out" 'could not set up the graphics stand-in for amd64' "the amd64 failure is said"
+has "$T/out" 'dpkg-deb: error: could not make the package' "with the real error message"
+has "$T/out" 'Note: apt also wants the Mesa graphics drivers and LLVM (4 packages' "the plan shows the extra packages (2 for each CPU type)"
+has "$T/out" 'The graphics stand-in that normally keeps them out could not be installed' "and links that to the failed stand-in"
+has "$T/out" 'Debian is ready' "and the setup ends normally"
+
+echo; echo "=== 18. the files download several at a time (4 by default), and the progress lines show the speed and the time left"
+fresh
+run FAKE_WGET_SLOW=0.15 > "$T/out" 2>&1; rc=$?
+grep -n 'up to 4 at a time' "$T/out" | head -n 2; grep -m3 ' MB/s\| kB/s\|waiting for data' "$T/out"; echo "exit=$rc"
+[ "$rc" = 0 ] && ok "exit 0" || bad "exit status $rc"
+has "$T/out" 'downloading [0-9]* files, [0-9.]* MB, up to 4 at a time' "the intro says how many at a time"
+maxc=$(awk '$1 == "wget-start" { n++; if (n > m) m = n } $1 == "wget-end" { n-- } END { print m + 0 }' <(sort -k3,3n "$T/wget-times"))
+[ "$maxc" = 4 ] && ok "at most 4, and really 4 at once" || bad "at most $maxc downloads at the same time (wanted exactly 4)"
+has "$LOG" "^wget -q -c --tries=4 .* -O $T/var/cache/apt/archives/partial/libx11-6_1.0_arm64.deb http://deb.example/" "wget continues cut-off files (-c) and writes into apt's partial folder"
+# a plan of 3 files or fewer (ca-certificates + wget, box64) is not worth starting wget for: apt takes those; the other 92 come in parallel
+[ "$(count '^apt-fetched ')" = 3 ] && ! grep -q '^apt-fetched libx11-6_' "$LOG" && ok "apt fetched only the 3 files of the two small plans; the 92 others came in parallel" || bad "apt itself fetched $(count '^apt-fetched ') files"
+has "$T/out" 'downloaded [0-9.]* of [0-9.]* MB ([0-9]*%) - [0-9]* of [0-9]* files - \([0-9.]* MB/s\|[0-9]* kB/s\|waiting for data\)' "a progress line shows the speed"
+has "$T/out" 'files - .*, about [0-9]* min left' "and the time that is left"
+has "$T/out" 'downloaded [0-9.]* of [0-9.]* MB (100%)' "and it ends at 100%"
+
+echo; echo "=== 19. wget fails (no connection of that kind): apt downloads the files itself, one after the other"
+fresh
+run FAKE_WGET=fail > "$T/out" 2>&1; rc=$?
+grep -m2 'did not come through' "$T/out"; echo "exit=$rc"
+[ "$rc" = 0 ] && ok "exit 0" || bad "exit status $rc"
+has "$T/out" 'file(s) did not come through this way. apt will fetch them now' "it says that apt takes over"
+n=$(count '^apt-fetched '); [ "$n" = 95 ] && ok "apt fetched all $n files itself" || bad "apt fetched $n files (wanted all 95)"
+has "$T/out" 'Debian is ready' "and the setup ends normally"
+
+echo; echo "=== 20. a file that arrives damaged is never accepted (the checksum is wrong): apt fetches it"
+fresh
+run FAKE_WGET=corrupt > "$T/out" 2>&1; rc=$?
+echo "exit=$rc"
+[ "$rc" = 0 ] && ok "exit 0" || bad "exit status $rc"
+n=$(count '^apt-fetched '); [ "$n" = 95 ] && ok "all $n files were fetched by apt: none of the damaged ones got through" || bad "apt fetched $n of the 95 files: a damaged one may have been accepted"
+has "$T/out" 'did not come through this way' "the damaged files are reported"
+if compgen -G "$T/var/cache/apt/archives/partial/*" > /dev/null; then bad "damaged files are left in partial/"; else ok "no damaged file is left in apt's partial folder"; fi
+
+echo; echo "=== 21. SPFT_JOBS=1 switches the parallel download off: only apt downloads"
+fresh
+run SPFT_JOBS=1 > "$T/out" 2>&1; rc=$?
+echo "exit=$rc"
+[ "$rc" = 0 ] && ok "exit 0" || bad "exit status $rc"
+[ "$(count '^wget -q -c')" = 0 ] && ok "no wget download of packages" || bad "wget was used $(count '^wget -q -c') times"
+has "$T/out" 'apt names each file below' "the intro says that apt names the files"
+n=$(count '^apt-fetched '); [ "$n" = 95 ] && ok "apt fetched all $n files" || bad "apt fetched $n files (wanted all 95)"
+
+echo; echo "=== 22. apt's own retrying is off, so its endless 'Tried to start delayed item' line cannot appear; if it comes anyway, it is hidden"
+fresh
+run FAKE_APT_SPAM=1 SPFT_JOBS=1 > "$T/out" 2>&1; rc=$?
+echo "exit=$rc   lines in the output: $(wc -l < "$T/out")"
+[ "$rc" = 0 ] && ok "exit 0" || bad "exit status $rc"
+hasnt "$T/out" 'Tried to start delayed item' "that line is not shown (the stand-in apt printed it 60 times for each download)"
+has "$T/out" '^Get:1 http://deb.example' "while apt's other lines still are"
+
+echo; echo "=== 23. a connection that drops: the step is tried again, with one calm line, and then goes on"
+fresh
+run FAKE_APT_FLAKY=update SPFT_RETRY_WAIT=1 > "$T/out" 2>&1; rc=$?
+grep -n 'did not work' "$T/out"; echo "exit=$rc"
+[ "$rc" = 0 ] && ok "exit 0" || bad "exit status $rc"
+has "$T/out" 'That did not work (exit status 100), probably the connection. Trying again in 1s: attempt 2 of 4' "one line says what happens and what comes next"
+n=$(grep -c ' update$' "$LOG" || true); [ "$n" = 4 ] && ok "apt-get update ran 4 times: the one that failed, and the 3 steps" || bad "apt-get update ran $n times (wanted 4)"
+has "$LOG" 'Acquire::Retries=0.* -o APT::Update::Error-Mode=any update' "update fails on any package list it cannot fetch (so that it is tried again)"
+
+echo; echo "=== 24. the network settings of Debian: no retrying inside apt, no translations, short timeouts, IPv4 first"
+fresh
+run > /dev/null 2>&1
+C=$T/etc/apt/apt.conf.d/02spft-network
+has "$C" '^Acquire::Retries "0";' "apt.conf: no retrying inside apt (the bug of apt 3.0.3)"
+has "$C" '^Acquire::Languages "none";' "no translations"
+has "$C" '^Acquire::PDiffs "false";' "no patching of package lists"
+has "$C" '^Acquire::http::Timeout "30";' "a 30 second timeout"
+has "$C" '^Acquire::http::Pipeline-Depth "0";' "one request at a time"
+has "$T/etc/gai.conf" '^precedence ::ffff:0:0/96  100$' "gai.conf: IPv4 is tried first"
+run > /dev/null 2>&1
+n=$(grep -c '^precedence ::ffff:0:0/96' "$T/etc/gai.conf" || true); [ "$n" = 1 ] && ok "and not added a second time by the next run" || bad "gai.conf has $n precedence lines"
 
 echo; echo "FAIL count: $fails"
 rm -rf "$T"; echo "cleaned up"

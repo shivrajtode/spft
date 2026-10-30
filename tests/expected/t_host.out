@@ -80,7 +80,7 @@ SPFT_DISPLAY=x11 spft-run
 >> screen 1080x1920: zoom 145% keeps the whole tool window on it (choose your own with: spft x11 zoom=N)
 start: exit=0   tool started: 1
 spft - SP Flash Tool on a rooted phone or tablet (Termux + Debian chroot + box64 + Termux:X11)
-  spft                      start SP Flash Tool (the same as: spft x11)
+  spft                      open the menu: Start SP Flash Tool is the first entry, then screen settings, stop, check,
 help: exit=0
 spft - SP Flash Tool on a rooted phone or tablet (Termux + Debian chroot + box64 + Termux:X11)
 unknown: exit=1
@@ -167,7 +167,7 @@ cache     : cleared, 0.0 MB freed (Debian's /tmp and ~/.cache, the Termux:X11 ap
 memory    : the phone's file cache was dropped, so more RAM is free
 wakelock  : released, the phone may sleep again
 
-All of spft is stopped. Start it again with:  spft
+All of spft is stopped. Start it again with:  spft start   (or open the menu with:  spft)
 exit=0
 ok: the tool process is gone
 wake-unlock calls: 1
@@ -180,7 +180,7 @@ cache     : cleared, 0.0 MB freed (Debian's /tmp and ~/.cache, the Termux:X11 ap
 memory    : the phone's file cache was dropped, so more RAM is free
 wakelock  : released, the phone may sleep again
 
-All of spft is stopped. Start it again with:  spft
+All of spft is stopped. Start it again with:  spft start   (or open the menu with:  spft)
 exit=0
 
 === I2. stop also stops the Termux:X11 server, and removes the socket that a killed server leaves behind
@@ -194,7 +194,7 @@ cache     : cleared, 0.0 MB freed (Debian's /tmp and ~/.cache, the Termux:X11 ap
 memory    : the phone's file cache was dropped, so more RAM is free
 wakelock  : released, the phone may sleep again
 
-All of spft is stopped. Start it again with:  spft
+All of spft is stopped. Start it again with:  spft start   (or open the menu with:  spft)
 exit=0
 ok: the server process is gone
 ok: the socket file is gone
@@ -208,7 +208,7 @@ cache     : cleared, 0.0 MB freed (Debian's /tmp and ~/.cache, the Termux:X11 ap
 memory    : the phone's file cache was dropped, so more RAM is free
 wakelock  : released, the phone may sleep again
 
-All of spft is stopped. Start it again with:  spft
+All of spft is stopped. Start it again with:  spft start   (or open the menu with:  spft)
 exit=0
 ok: the stale socket is gone
 -- nothing at all: nothing to report about a server or a socket
@@ -233,7 +233,7 @@ cache     : cleared, N.N MB freed (Debian's /tmp and ~/.cache, the Termux:X11 ap
 memory    : the phone's file cache was dropped, so more RAM is free
 wakelock  : released, the phone may sleep again
 
-All of spft is stopped. Start it again with:  spft
+All of spft is stopped. Start it again with:  spft start   (or open the menu with:  spft)
 ok: the tool process is gone
 ok: the Termux:X11 server process is gone
 ok: gone - the server's socket file
@@ -269,7 +269,7 @@ cache     : cleared, N.N MB freed (the Termux:X11 app's cache only. Debian's own
 memory    : the phone's file cache was dropped, so more RAM is free
 wakelock  : released, the phone may sleep again
 
-All of spft is stopped. Start it again with:  spft
+All of spft is stopped. Start it again with:  spft start   (or open the menu with:  spft)
 exit=0
 ok: kept - Debian's /tmp file (something is still mounted in Debian, so it was not touched)
 ok: gone - the app's cache (it is not in Debian)
@@ -572,6 +572,126 @@ Keep in mind:
 -- the check is only a read: it changed nothing in Debian
 ok: no marker written
 
+=== M. the menu: `spft` in a terminal opens a dialog with Start SP Flash Tool first (a stand-in for dialog answers with the tags we give it)
+-- bare spft with a terminal opens the menu; entry 1 starts the tool
+exit=0   dialog calls: 1   tool started: 1
+ok: the box says: Made by @Shivraj_editx
+ok: the title has the version from the file VERSION
+ok: Start SP Flash Tool is the first entry
+ok: the cancel button says Exit
+ok: entry: Start with screen settings ...
+ok: entry: Stop and clear the caches
+ok: entry: Check this phone and setup
+ok: entry: Update spft
+ok: entry: Install/change SP Flash Tool
+ok: entry: Repair setup (install again)
+ok: entry: Open a shell inside Debian
+ok: entry: Start on a VNC desktop
+ok: entry: Open menu at Termux start: off
+ok: entry: About
+ok: entry: Uninstall
+-- Exit (or Esc) closes the menu and starts nothing
+exit=0   dialog calls: 1   tool started: 0
+-- entry 2: the screen settings, a list of their own
+exit=0   dialog calls: 2   tool started: 1
+the screen list: 1 Fit the screen (default) 2 Landscape, other way up 3 Portrait (do not rotate) 4 Smaller: zoom 100 5 Bigger: zoom 150 (may cut) 6 Keep the extra keys bar 7 Leave Termux:X11 alone 8 Put Termux:X11 settings back
+Termux:X11 settings now: fullscreen=true forceOrientation=reverse landscape displayScale=145 displayResolutionMode=scaled displayFilteringMode=bilinear additionalKbdVisible=false showAdditionalKbd=true touchMode=1 
+bigger: displayScale=150
+portrait: forceOrientation=portrait   zoom: displayScale=100
+leave alone: settings calls: 0   tool started: 1
+-- Exit in the screen list goes back to the main menu
+exit=0   dialog calls: 3   tool started: 0
+-- entry 4 runs spft check and the menu stays open (a second dialog call follows)
+exit=0   dialog calls: 2
+the check printed its Result block: 1
+the prompt after it: Press Enter to go back to the menu ...
+-- a command that fails does not close the menu (uninstall is asked, and nothing answers: it cancels with status 1)
+exit=0   dialog calls: 2
+cancelled - nothing was deleted
+(it ended with exit status 1)
+ok: nothing was deleted
+-- entry 8: a shell inside Debian; when it ends, the menu is there again
+exit=0   dialog calls: 2   chroot calls: 1
+-- entry 3: stop
+exit=0   dialog calls: 2
+All of spft is stopped. Start it again with:  spft start
+-- entries 5, 6 and 7 (update, tool, install): each runs the command of that name and the menu is there again (the three commands are replaced by stand-ins here)
+exit=0   dialog calls: 4
+STUB update
+STUB tool
+STUB install
+-- entry 9: VNC
+exit=0   tool started: 1   mode: 1
+-- entry b: About
+exit=0
+spft test-1 - SP Flash Tool on a rooted Android phone or tablet
+Made by Shivraj - Telegram @Shivraj_editx (https://t.me/Shivraj_editx) - GitHub shivrajtode
+Source: https://github.com/shivrajtode/spft
+-- the autostart entry switches on and off; the line in the list shows which
+exit=0   dialog calls: 3
+Open menu at Termux start: ON
+Open menu at Termux start: off
+config now: AUTOSTART=0   hook in .bashrc: 0
+messages: on: 1   off: 1
+-- spft autostart on / off / status, typed by hand; it adds the hook once and takes out only its own lines
+autostart is off
+The spft menu will open every time you open Termux. Turn that off with:  spft autostart off
+The spft menu will open every time you open Termux. Turn that off with:  spft autostart off
+autostart is ON: the menu opens when Termux starts
+hooks in .bashrc after on, on: 1   .zshrc made: no
+export FOO=bar
+alias ll="ls -l"
+# >>> spft >>> (added by spft: turn it off with  spft autostart off)
+if { [ -t 0 ] && [ -t 1 ] || [ -n "${SPFT_FORCE_TTY:-}" ]; } && [ -z "${SPFT_NO_AUTO:-}" ] && command -v spft >/dev/null 2>&1; then
+  if grep -qs '^AUTOSTART=1' "$HOME/.spft/config" 2>/dev/null; then
+    spft
+  fi
+fi
+# <<< spft <<<
+The spft menu will no longer open by itself.
+autostart is off
+after off: hooks: 0   the other lines are still there: 2   config: AUTOSTART=0
+spft: autostart: say on, off or status
+exit=1
+a .zshrc that exists gets the hook too: 1
+and loses it again: 0   its own line stays: 1
+-- the hook: it opens the menu in a terminal, only while AUTOSTART=1, and never when SPFT_NO_AUTO is set
+AUTOSTART=1, a terminal:      menu opened 1 time(s)
+AUTOSTART=1, no terminal:     menu opened 0 time(s)
+AUTOSTART=1, SPFT_NO_AUTO=1:  menu opened 0 time(s)
+AUTOSTART=0, a terminal:      menu opened 0 time(s)
+-- the text menu (SPFT_MENU=text): a numbered list, no dialog program
+exit=0   dialog calls: 0   tool started: 1   zoom: displayScale=150
+  spft
+  1) Start SP Flash Tool
+  2) Start with screen settings ...
+  a) Open menu at Termux start: off
+  0) Exit
+unknown entry, then check, Enter, 0: exit=0   Result blocks: 1   menus shown: 3
+There is no entry 'x' - type one of the characters in the list, or 0 to leave.
+-- a screen too narrow for the box (the longest entry has 30 characters, the box needs 44 columns) gets the numbered list, nothing is cut off
+30 columns: exit=0   dialog calls: 0   box width given:    list shown: 1   tool started: 1
+43 columns: exit=0   dialog calls: 0   box width given:    list shown: 1   tool started: 1
+44 columns: exit=0   dialog calls: 1   box width given: 42   list shown: 0   tool started: 1
+50 columns: exit=0   dialog calls: 1   box width given: 48   list shown: 0   tool started: 1
+120 columns: exit=0   dialog calls: 1   box width given: 64   list shown: 0   tool started: 1
+a width that is not a number: exit=0   dialog calls: 1 (the box is used)
+-- no dialog program (and pkg cannot get one): the same list as text
+exit=0
+
+  spft test-1
+  -----------
+  1) Start SP Flash Tool
+with a pkg that fails: exit=0
+setting up the menu (one time) ...
+
+-- spft version, and the menu without a terminal
+test-1
+spft: the menu needs a terminal. To start the tool without one:  spft start
+menu without a terminal: exit=1
+bare spft without a terminal starts the tool: 1
+?
+
 === U. spft update: git pull, then the install step runs again (here the pkg stand-in stops it)
 
 >> getting the newest spft
@@ -586,7 +706,7 @@ Fast-forward
 
 >> checking root
 >> kernel is 64-bit ARM - OK (a 32-bit Android userspace and 32-bit Termux don't matter)
-pkg stub: would install install -y wget curl xz-utils tar unzip coreutils
+pkg stub: would install install -y wget curl xz-utils tar unzip coreutils dialog
 spft: pkg could not install the Termux packages (try: termux-change-repo)
 exit=1
 ok: the clone got the newer lib/run.sh

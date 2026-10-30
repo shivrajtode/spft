@@ -14,6 +14,7 @@
 
 <p align="center">
   <a href="#start-in-3-steps"><b>Start</b></a> &nbsp;·&nbsp;
+  <a href="#see-it-running">See it running</a> &nbsp;·&nbsp;
   <a href="#check-a-phone-first-no-install">Check your phone</a> &nbsp;·&nbsp;
   <a href="docs/GUIDE.md">Guide</a> &nbsp;·&nbsp;
   <a href="docs/TROUBLESHOOTING.md">Fix a problem</a> &nbsp;·&nbsp;
@@ -46,6 +47,30 @@
   </tr>
 </table>
 
+## See it running
+
+<p align="center">
+  <a href="assets/screenshots/running-on-android.jpg"><img src="assets/screenshots/running-on-android.jpg" alt="The real SP Flash Tool v5 running on an Android tablet. The Android status bar (carrier, battery) and the notification panel at the top show Termux and Termux:X11 running at the same time." width="780"></a>
+  <br><sub>No PC: this is the tablet's own screen. The status bar, the clock and the Termux and Termux:X11 notifications are Android's.</sub>
+</p>
+
+<table>
+  <tr>
+    <td width="33%" valign="top" align="center">
+      <a href="assets/screenshots/welcome.jpg"><img src="assets/screenshots/welcome.jpg" alt="The Welcome tab of SP Flash Tool v5, filling the whole screen" width="100%"></a><br>
+      <sub><b>Fits the screen.</b> The Welcome tab, nothing cut off.</sub>
+    </td>
+    <td width="33%" valign="top" align="center">
+      <a href="assets/screenshots/download-tab.jpg"><img src="assets/screenshots/download-tab.jpg" alt="The Download tab of SP Flash Tool v5, with the Download-Agent file already selected" width="100%"></a><br>
+      <sub><b>Ready to flash.</b> The Download tab, with its Download-Agent file already selected.</sub>
+    </td>
+    <td width="33%" valign="top" align="center">
+      <a href="assets/screenshots/file-picker.jpg"><img src="assets/screenshots/file-picker.jpg" alt="The file window of SP Flash Tool v5 showing the phone's storage, /sdcard" width="100%"></a><br>
+      <sub><b>Sees your files.</b> The file window opens the phone's storage, <code>/sdcard</code>.</sub>
+    </td>
+  </tr>
+</table>
+
 ## What you need
 
 | The phone that runs spft (the host) | The device you want to fix (the target) |
@@ -60,7 +85,7 @@ Not sure about your phone? [Check it first](#check-a-phone-first-no-install). It
 ## Start in 3 steps
 
 <p align="center">
-  <img src="assets/steps.svg" alt="Three steps: 1. get the apps (Termux and Termux:X11, not from Google Play). 2. Install spft with one line, once, in about 15 to 30 minutes. 3. Start it by typing spft." width="100%">
+  <img src="assets/steps.svg" alt="Three steps: 1. get the apps (Termux and Termux:X11, not from Google Play). 2. Install spft with one line, once. It is safe to run again if it stops. 3. Start it by typing spft." width="100%">
 </p>
 
 ### Step 1. Get the apps
@@ -85,8 +110,8 @@ pkg update -y && pkg install -y git && git clone https://github.com/shivrajtode/
 ```
 
 - At the very start your root app asks: press **Allow** for Termux, quickly. (KernelSU and APatch may show no window: switch Termux on in their *Superuser* list before you start.)
-- The first time it takes **15 to 30 minutes** and downloads a few hundred MB. Keep Termux open and the phone charging. A quiet screen is not a hang: [what you will see](docs/GUIDE.md#3-install-spft-one-time).
-- Stopped half way? Run `bash ~/spft/install.sh` again. It only does what is still missing.
+- The first time it downloads a few hundred MB. How long that takes depends on your internet: spft shows the speed and the time left, and it downloads four files at a time. Keep Termux open and the phone charging. A quiet screen is not a hang: [what you will see](docs/GUIDE.md#3-install-spft-one-time).
+- Stopped half way, or the internet dropped? Run `bash ~/spft/install.sh` again. It only does what is still missing, and it carries on with the downloads where they stopped.
 
 <details>
 <summary>Why two commands, and not only <code>git clone</code>?</summary>
@@ -97,13 +122,13 @@ pkg update -y && pkg install -y git && git clone https://github.com/shivrajtode/
 
 ### Step 3. Start it
 
-When you see `done. Start SP Flash Tool with:  spft`, type:
+When the install says `done`, type:
 
 ```
 spft
 ```
 
-SP Flash Tool opens on the Termux:X11 screen, fitted to your display. Next: [**flash your device without errors**](docs/GUIDE.md#6-flash-firmware-without-errors).
+A small menu opens. **Start SP Flash Tool** is its first entry: pick it, and the tool opens on the Termux:X11 screen, fitted to your display. The menu also has the screen settings, stop, check, update, a shell in Debian, and a switch to open this menu every time you open Termux. Want to skip the menu? Type `spft start`. Next: [**flash your device without errors**](docs/GUIDE.md#6-flash-firmware-without-errors).
 
 ## Check a phone first (no install)
 
@@ -133,11 +158,13 @@ The check ends with a **Result**: whether spft can run on this device, and what 
 
 | Command | What it does |
 |---|---|
-| `spft` | Start SP Flash Tool |
+| `spft` | Open the menu. **Start SP Flash Tool** is its first entry. |
+| `spft start` | Start SP Flash Tool at once, without the menu |
 | `spft stop` | Force-stop everything of spft and clear the caches. Never while it flashes. |
 | `spft check` | Test the phone and the setup, with a hint for every problem |
 | `spft update` | Get the newest spft and apply it |
 | `spft tool` | Install or change SP Flash Tool, for example when its download fails |
+| `spft autostart on` | Open the menu every time you open Termux (`off` switches it off again) |
 | `spft uninstall` | Delete the Debian system and the downloads. Asks first. |
 | `spft help` | Show all commands |
 
@@ -180,12 +207,16 @@ Still stuck? Open an issue at <https://github.com/shivrajtode/spft/issues> and p
 
 <div align="center">
 
-Made by **Shivraj**: Telegram [@Shivraj_editx](https://t.me/Shivraj_editx), GitHub [shivrajtode](https://github.com/shivrajtode).
-
 And Special thanx💖 to my friend **Kaif** Telegram [@mkr_infinity](https://t.me/mkr_infinity) for recommending spflashtool linux version and giving some guide about it.
 
 Thanks to [Termux](https://termux.dev/en/), [Termux:X11](https://github.com/termux/termux-x11), [box64](https://github.com/ptitSeb/box64), [Debian](https://www.debian.org), [mtkclient](https://github.com/bkerler/mtkclient), and the [Hovatek forum](https://www.hovatek.com/forum/post-228.html) for its SP Flash Tool guide and [error code list](https://www.hovatek.com/forum/post-93019.html).
 
-License: [MIT](LICENSE) (this repository only, not SP Flash Tool).
+<br>
+
+<a href="https://t.me/Shivraj_editx"><img src="https://t.me/i/userpic/320/Shivraj_editx.jpg" width="105" height="105" alt="@Shivraj_editx on Telegram: the live profile picture"></a>&nbsp;<a href="https://t.me/Shivraj_editx"><img src="assets/author-card.svg" alt="Made by @Shivraj_editx on Telegram, creator of spft" width="420" height="105"></a>
+
+If spft saved you a trip to a PC, drop a ⭐ on the repo. It really helps!
+
+<sub>MIT licensed (this repository only, not SP Flash Tool) · see <a href="LICENSE">LICENSE</a> · GitHub <a href="https://github.com/shivrajtode">shivrajtode</a></sub>
 
 </div>

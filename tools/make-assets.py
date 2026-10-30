@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Draws the pictures of the README: everything in assets/ (the banner, the stack picture, the badges, the icons and the
-social preview). You do NOT need this to use spft: the pictures are already in the repository. Run it only if you want to
-change them:
+"""Draws the pictures of the README: everything in assets/ except the screenshots (the banner, the stack picture, the badges,
+the icons, the author card and the social preview). You do NOT need this to use spft: the pictures are already in the
+repository. Run it only if you want to change them:
 
     python3 tools/make-assets.py                      # writes assets/*.svg
     python3 tools/make-assets.py --png chromium       # also writes social-preview.png (needs a browser and Pillow)
@@ -460,7 +460,7 @@ def steps():
     W, H = 1280, 224
     cards = [
         ("1", "apps", "Get the apps", ["Termux and Termux:X11,", "not from Google Play"]),
-        ("2", "terminal", "Install spft", ["One line, once.", "About 15 to 30 minutes."]),
+        ("2", "terminal", "Install spft", ["One line, once.", "Wait until it says done."]),
         ("3", "play", "Start it", ["Type spft.", "That is all."]),
     ]
     cw, gap, ch = 372, 62, 148
@@ -526,6 +526,53 @@ def social():
     return svg(W, H, "spft: SP Flash Tool on an Android phone", "".join(b), "", defs)
 
 
+# --- 7. the author card: the last thing in the README, next to the live Telegram photo ----------------------------------------------
+# A paper plane (the Telegram symbol) on a 20 x 20 grid
+PLANE = ("M3.5 10.1 L16.5 4.9 C17.3 4.57 17.9 5.05 17.65 6.05 L15.1 17.8 C14.9 18.7 14.35 18.95 13.6 18.5 L10 16 L8.3 17.7 "
+         "C8.1 17.9 7.9 18.1 7.5 18.1 L7.8 14.2 L14.6 7.8 C14.9 7.5 14.5 7.35 14.1 7.63 L5.6 13.1 L2.3 12 C1.5 11.75 1.5 11.2 2.2 10.78 Z")
+
+
+def author_card():
+    W, H = 600, 150
+    left = 104                                   # where the text starts
+    handle, link = "@Shivraj_editx", "t.me/Shivraj_editx"
+    # the little LED wordmark "spft" on the right (the lit LEDs are mint, the others are dim)
+    P, R = 6.4, 2.5
+    cells, cols = led_cells("spft", 1)
+    rows = 9
+    lw = (cols - 1) * P
+    lx, ly = W - 36 - lw, 30
+    lit = set(cells)
+    dots = "".join('<circle cx="%s" cy="%s" r="%s" fill="%s"%s/>' % (num(lx + c * P), num(ly + r * P), num(R), MINT if (c, r) in lit else OFF,
+                                                                    "" if (c, r) in lit else ' opacity=".8"')
+                   for r in range(rows) for c in range(cols))
+    # the link pill: a plane, then the address
+    ps = 15
+    pw = 14 + 20 + 8 + face("semi").width(link, ps) + 18
+    ph = 36
+    pill = ('<g transform="translate(%d 96)"><rect x=".7" y=".7" width="%s" height="%s" rx="%s" fill="%s" fill-opacity=".14" stroke="%s" stroke-opacity=".6" stroke-width="1.4"/>'
+            '<g transform="translate(12 7) scale(1)"><path d="%s" fill="%s"/></g>%s</g>') % (
+        left, num(pw - 1.4), num(ph - 1.4), num(ph / 2 - .7), MINT, MINT, PLANE, MINT,
+        text("semi", link, ps, 14 + 20 + 8, ph / 2 + ps * 0.36, INK))
+    defs = grid_defs(W, H, 30)
+    defs += ('<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="%s"/><stop offset="1" stop-color="%s"/></linearGradient>'
+             '<radialGradient id="glow" cx="84%%" cy="22%%" r="46%%"><stop offset="0" stop-color="%s" stop-opacity=".16"/><stop offset="1" stop-color="%s" stop-opacity="0"/></radialGradient>'
+             '<clipPath id="card"><rect x="3" y="3" width="%d" height="%d" rx="24"/></clipPath>') % (BG0, BG1, MINT, MINT, W - 6, H - 6)
+    b = ['<g clip-path="url(#card)"><rect width="%d" height="%d" fill="url(#bg)"/>' % (W, H),
+         '<rect width="%d" height="%d" fill="url(#grid)" mask="url(#gridmask)"/>' % (W, H),
+         '<rect width="%d" height="%d" fill="url(#glow)"/></g>' % (W, H),
+         '<rect x="3.75" y="3.75" width="%d" height="%d" rx="23.25" fill="none" stroke="%s" stroke-width="1.5"/>' % (W - 7.5, H - 7.5, LINE),
+         # the chip with the plane
+         '<rect x="34" y="30" width="52" height="52" rx="18" fill="%s"/>' % MINT,
+         '<g transform="translate(%s %s) scale(1.55)"><path d="%s" fill="%s"/></g>' % (num(34 + 26 - 9.7 * 1.55 - 0.6), num(30 + 26 - 11.9 * 1.55), PLANE, BG0),
+         text("medium", "Made by", 17, left, 50, CHALK, tracking=0.2),
+         text("bold", handle, 34, left, 84, INK, tracking=-0.3),
+         pill,
+         dots,
+         text("regular", "Creator of spft", 13.5, W - 36, 128, CHALK, "end")]
+    return svg(W, H, "Made by " + handle + " on Telegram", "".join(b), "", defs, desc="Made by @Shivraj_editx on Telegram, creator of spft")
+
+
 def write_png(browser, svg_path, png_path, w, h):
     """A picture of the SVG, with a headless browser (chrome-headless-shell gives the exact size; other browsers are cropped to it)."""
     import tempfile
@@ -564,7 +611,8 @@ def main():
         sys.exit("make-assets: these font files were not found:\n  %s\nInstall Inter and DejaVu Sans Mono (Debian: apt install fonts-inter fonts-dejavu-core), "
                  "or give --font DIR and --mono FILE." % "\n  ".join(missing))
     os.makedirs(a.out, exist_ok=True)
-    files = {"banner.svg": banner, "steps.svg": steps, "terminal.svg": terminal, "stack.svg": stack, "social-preview.svg": social}
+    files = {"banner.svg": banner, "steps.svg": steps, "terminal.svg": terminal, "stack.svg": stack, "social-preview.svg": social,
+             "author-card.svg": author_card}
     for fn_, label, value, dot in BADGES:
         files[fn_] = (lambda l=label, v=value, d=dot: badge(l, v, d))
     for nm in ICONS_USED:

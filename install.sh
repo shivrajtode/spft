@@ -4,7 +4,7 @@
 #     bash install.sh
 #
 # It installs what Termux needs, adds the `spft` command, then sets up Debian + box64 and downloads
-# SP Flash Tool (15-30 minutes the first time; keep the phone awake and plugged in). Running it again is safe.
+# SP Flash Tool (the first time it takes a while, depending on the internet; keep the phone awake and plugged in). Running it again is safe.
 # Any option is passed on to `spft install` (the only one is --no-tool: do not download SP Flash Tool).
 set -eu
 

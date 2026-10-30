@@ -22,6 +22,7 @@ Android (rooted)
 
 ```
 spft                the command (a bash script). `spft help` lists the commands.
+VERSION             the version number (`spft version`, the title of the menu)
 install.sh          one-time installer: Termux packages, the `spft` command, then `spft install`
 check.sh            the check WITHOUT installing: downloads the repository into a temporary folder, runs `spft check`, deletes it
 lib/tools.conf      SP Flash Tool versions: name, sha256, download address
@@ -36,7 +37,7 @@ tools/kernelfix.s   source of that library (x86-64 assembly, no libc)
 tools/build-kernelfix.sh  rebuilds lib/kernelfix.so.b64 from it
 tests/              automatic tests: bash tests/run_all.sh
 docs/               GUIDE.md (every step), TROUBLESHOOTING.md (errors), HOW-IT-WORKS.md (this page)
-assets/             the pictures of the README (SVG), social-preview.png for the repository's share card, and a note on changing them
+assets/             the pictures of the README (SVG, drawn by tools/make-assets.py), assets/screenshots/ (four photos of the tool running on a tablet), social-preview.png for the repository's share card, and a note on changing them
 ```
 
 ## Files that spft creates
@@ -47,10 +48,23 @@ assets/             the pictures of the README (SVG), social-preview.png for the
 | `~/spft-dl/` | Downloads and working files: `rootfs.tar.gz` (Debian), `SP_Flash_Tool_<version>_Linux.zip`, `app/` (a copy of `spft` and `lib/` for the root step), `x11.log`, `x11-prefs.orig` (your Termux:X11 settings before spft changed them, for `spft x11 reset`). |
 | `/data/local/spft-debian/` | The Debian system. Inside it: `/opt/SP_Flash_Tool_*` (the tool), `/opt/spft-current` (a link to the version that starts), `/usr/local/bin/spft-run` and `spft-gui`, `/usr/local/lib/spft/` (the kernel-version fix), `/root/spft-provision.sh`. |
 | `/tmp/spft-kernelfix.so`, `/tmp/spft-fake-kernel` (inside Debian) | Written by `spft-run` each time the tool starts on a kernel that needs the fix, and removed when it does not ([the fix](#the-kernel-version-fix)). |
+| `~/.spft/config` | The menu's settings, one `KEY=value` per line. Only `AUTOSTART` so far. |
+| `~/.bashrc` (and `~/.zshrc`, if there is one) | Only after `spft autostart on`: a block between the lines `# >>> spft >>>` and `# <<< spft <<<`. `autostart off` and `uninstall` remove exactly those lines. |
 | `/data/local/spft-debian/.spft-unpacked` | Proves the Debian unpack ran to the end. |
 | `/data/local/spft-debian/.spft-provisioned` | Holds the checksum of `lib/provision.sh`. When `spft update` changes that file, the setup runs again once. |
 
-## What happens when you type `spft`
+## The menu: what `spft` does without an argument
+
+In a terminal, `spft` opens a [`dialog`](https://invisible-island.net/dialog/) menu, the same kind of box as FlashKit's: "Made by @Shivraj_editx" at the top, **Exit** where dialog says Cancel, and **Start SP Flash Tool** as the first entry. Where there is no terminal (a launcher shortcut, a script, `spft | cat`), `spft` asks nothing and starts the tool, as it always did. `spft start` starts the tool in every case, and `spft menu` opens the menu or says that there is no terminal.
+
+- **Every entry is a child process.** An entry runs `spft check`, `spft stop` and so on as `bash spft check`. Most of spft ends its commands with `die`, which calls `exit`: inside the menu's own process that would close the menu. This way a failing command only prints `(it ended with exit status 1)` and the menu comes back. Start, VNC and the screen list use `exec` instead: the tool is what you came for, and the menu has nothing more to do.
+- **The answer** comes from dialog's standard error (the `3>&1 1>&2 2>&3` swap, because dialog draws on standard output), into the variable `CHOICE`, not through the output of a function.
+- **Sizes `0 0 0`:** dialog fits the box to the screen by itself, so it also works on a phone held upright.
+- **`dialog` is a Termux package.** `install.sh` installs it. If the menu finds it missing it runs `pkg install dialog` once (and says so); when that does not work, or with `SPFT_MENU=text`, the menu is a numbered list that you answer by typing.
+- **Autostart.** `spft autostart on` writes `AUTOSTART=1` to `~/.spft/config` and adds a block to `~/.bashrc` (and `~/.zshrc`, if it exists). The block opens the menu when Termux starts, but only in a terminal, only while `AUTOSTART=1`, only if `spft` can be found, and never when `SPFT_NO_AUTO` is set. `autostart off` removes exactly the lines between the two marker lines; the rest of your files is not touched. `spft uninstall` switches it off too, so that no menu starts that can start nothing.
+- **The tests** (`bash tests/t_host.sh`, section M) run the real menu with a stand-in `dialog` that answers with the tags it is given, and check the entries, Exit, the screen list, every kind of entry, autostart on and off, the hook in a new shell (with and without a terminal, with `SPFT_NO_AUTO`), the text menu, and a missing `dialog`. What they cannot check: how the real `dialog` looks on a phone's screen.
+
+## What happens when you start the tool (`spft start`)
 
 1. **As the normal Termux user.** spft starts the Termux:X11 server (`termux-x11 :0`) if it is not running, opens the Termux:X11 app, and sets *landscape, fullscreen* and [the zoom that fits your screen](#the-zoom) with `termux-x11-preference`. That tool can say "ok" for a value the app refused, and one refused key throws away a whole batch, so spft sets **one key per call** and reads every setting back to check. It keeps the phone's CPU awake (`termux-wake-lock`).
 2. **As root** (`su -c`). The root step runs a **copy** of `spft` and `lib/` kept in `~/spft-dl/app`, because the repository may sit on shared storage that root cannot always read. It unsets `LD_LIBRARY_PATH` first: Termux's libraries must never reach Android's own tools (they would fail with `CANNOT LINK EXECUTABLE`).
@@ -108,7 +122,7 @@ spft reads the screen size **as root** with `wm size`. That is the size Android 
 The tool's file windows are Qt's own (not the phone's). Their side bar lists *Computer* (Debian's `/`) and the **home folder** of the user, and spft used to run the tool as root, whose home is `/root`: the side bar showed a folder called *root*, and people got lost there, one click away from where their files are. Now `spft-run` starts **only the tool** with `HOME=/sdcard`, the phone's internal storage, and the side bar says *sdcard*.
 
 - Only the tool sees the changed `HOME`. Its settings and caches would otherwise move to the storage, so `XDG_CONFIG_HOME`, `XDG_CACHE_HOME` and `XDG_DATA_HOME` are pointed at the old home first (`/root/.config` and so on). The window manager is started before the change.
-- `SPFT_STORAGE` chooses: `auto` (the default: `/sdcard`), `off` (leave home as it is, `/root`, where `sdcard` and `Download` are links), or a folder (`SPFT_STORAGE=/sdcard/Firmware spft`). A folder that does not exist is ignored with a message. Remember that [it has to be typed in front of the command](#what-happens-when-you-type-spft) and that spft passes it on.
+- `SPFT_STORAGE` chooses: `auto` (the default: `/sdcard`), `off` (leave home as it is, `/root`, where `sdcard` and `Download` are links), or a folder (`SPFT_STORAGE=/sdcard/Firmware spft`). A folder that does not exist is ignored with a message. Remember that [it has to be typed in front of the command](#what-happens-when-you-start-the-tool-spft-start) and that spft passes it on.
 - What is **not** verified here: the real Qt file window on a phone. The tests check the environment that the tool is started with (`HOME`, the XDG folders), not the window itself.
 
 ## The install (`spft install`)
@@ -116,7 +130,7 @@ The tool's file windows are Qt's own (not the phone's). Their side bar lists *Co
 `install.sh` asks for root before it does anything else (`su -c 'id -u'`): the root app's window closes by itself after a few seconds, and nobody watches the screen 15 minutes into an install. Then `spft install` does these steps:
 
 1. Check root, the 64-bit kernel and the free space.
-2. `pkg install` the Termux packages, download the Debian **trixie arm64** root filesystem (the official Debian Docker image of `debuerreotype`), and unpack it as root.
+2. `pkg install` the Termux packages, download the Debian **trixie arm64** root filesystem (the official Debian Docker image of `debuerreotype`), and unpack it as root. The download goes to `rootfs.part` with `wget -c`, so a cut-off download is continued the next time; `gzip -t` checks the finished file, and a damaged one is deleted and fetched again from the start.
 3. Write DNS settings, make apt work without its sandbox user (Android does not give it network access), and run `lib/provision.sh` inside Debian: libraries (arm64 and amd64), `openbox`, a VNC server, **box64** (from the `box64-debs` apt repository, or built from source if that fails), and a **self-test** that runs a small x86-64 program through box64. If the self-test fails, the setup is **not** marked as done.
 4. Download SP Flash Tool (`spft tool --if-missing`).
 
@@ -128,7 +142,7 @@ On a slow tablet `apt` can work for minutes without printing a line, and a scree
 
 - It asks apt **once** what a step will install (`apt-get install -s`, one dry run for the whole list; an earlier version made about 90 dry runs, one per package, silently), counts the files and megabytes from `apt-get install --print-uris`, and skips the names this Debian does not have (it says which).
 - **That check shows a moving bar.** It is the one part that can take a minute without anything to count, and it used to be silent, so people took it for a hang. `bar()` draws one line over and over (`\r`): a block of 5 `=` that goes to and fro in a frame of 20, plus the time, `[      =====         ] 0m12s`. When the check is done the bar fills up: `[====================] 0m23s - done`. The line stays under 40 characters, because a phone held upright is about 45 wide and a line that wraps cannot be drawn over again. When the output is **not a terminal** (a log file, a pipe) there is nothing to draw over, and a `... still working` line comes every 5 seconds instead. The check itself (`apt_plan`) prints nothing while the bar runs; what it has to say (an apt error, the skipped names) waits in variables and is printed right after.
-- It **downloads first** (`apt-get install -d`) and prints a progress line every 5 seconds from what has landed in `/var/cache/apt/archives` (finished files, and the size of the partial file): `downloaded 14.2 of 38.2 MB (37%) - 24 of 77 files`.
+- It **downloads first** and prints a progress line every 5 seconds from what has landed in `/var/cache/apt/archives` (finished files, and the size of the partial files): `downloaded 14.2 of 38.2 MB (37%) - 24 of 77 files - 1.9 MB/s, about 2 min left`. The speed is the one of the last few seconds; the time left comes from the average since the start, which is steadier.
 - It **installs** with a counter (`[12/77] Unpacking ...`, `[12/77] Setting up ...`); dpkg's long `(Reading database ...` lines are left out.
 - When a command is busy without anything to print (reading package lists, unpacking), a `... still working (1m20s)` line comes every 20 seconds.
 - **The little loops stop with the script.** They run in the background, and a background job of a script ignores Ctrl+C, so after every sleep each loop checks that the script is still there (`kill -0 $$`) and ends when it is not. Without that, a Ctrl+C left a bar or a counter printing on a screen where you were already typing the next command.
@@ -138,6 +152,19 @@ On a slow tablet `apt` can work for minutes without printing a line, and a scree
 - The self-test takes the real `busybox` program: it looks for an executable file of that name that is bigger than 100 KB. (The package also holds a *text* file called `busybox`; an older version tried to run that, and box64 answered with a red `[BOX64] Error: ... is not an executable file`.)
 
 `SPFT_BEAT`, `SPFT_POLL` and `SPFT_FRAME` (below) change the intervals (the `still working` lines, the download counter, one picture of the bar); the tests set them small.
+
+### Why the install is faster and quieter (v6)
+
+The first install used to take up to two hours on a slow connection. Four things were behind that, and they are what version 6 changes:
+
+1. **Mesa and LLVM that nobody uses.** `libgl1` and `libegl1` want "a graphics driver" (`libglx-mesa0 | libglx-vendor` and `libegl-mesa0 | libegl-vendor`). apt takes Mesa, and Mesa pulls in LLVM 19, ICU, Z3 and more: about 100 MB to download and 500 MB on the disk, for the arm64 libraries and again for the x86_64 ones. SP Flash Tool only needs the files `libGL.so.1` and `libEGL.so.1` to exist (they come from the small package `libglvnd`); it draws with plain X11. So `provision.sh` builds one **empty package**, `spft-gl-stub`, for each CPU type (no files, `Provides: libglx-vendor, libegl-vendor`) and installs it before apt works out the plan for that type. apt then sees "a driver is installed" and leaves Mesa out. If the stand-in cannot be made, or apt wants Mesa anyway, the install still works, only slower, and says so (`Note: apt also wants the Mesa graphics drivers and LLVM`). To get the real Mesa back: `spft enter 'apt remove spft-gl-stub'`, then install `libgl1-mesa-dri libglx-mesa0 libegl-mesa0`.
+2. **One file at a time.** apt downloads one file after the other, and a mobile connection is often slow per connection and not in total. `provision.sh` takes the list from `apt-get install --print-uris` and downloads up to `SPFT_JOBS` (default 4) files at once with `wget -c`. A file only gets its real name in apt's folder when its size and its SHA256 are the ones apt expects, so a damaged download is never handed to apt. Whatever fails here, apt fetches itself afterwards. With `SPFT_JOBS=1` only apt downloads.
+3. **Waiting for the flash storage.** dpkg waits for the storage after every file it unpacks. `--force-unsafe-io` (only during the setup) removes that wait, and it is the slowest part on a tablet's eMMC. If the power fails at that moment, the next `spft install` repairs it (`dpkg --configure -a`, then again).
+4. **The apt retry bug.** apt 3.0.3, the apt of Debian 13 (Debian bugs #1111554 and #1124940, fixed in apt 3.1.8), puts a file that failed once back in a queue with a growing wait, and while it waits it prints `W: Tried to start delayed item ... but failed` in a loop: thousands of lines, a phone that slows down, and then it goes on by itself. The cause is `Acquire::Retries` above 0. spft sets it to **0**: in `/etc/apt/apt.conf.d/02spft-network` (so also for the apt commands you type later) and on every apt command line it runs. It retries failed commands itself (`retry`: 5, 10 and 20 seconds apart, one calm line each time, and what was downloaded stays), and a filter hides that one line as a second safety.
+
+Smaller changes: no translations of the package descriptions (`Acquire::Languages=none`), no package-list patches (`PDiffs=false`), 30-second timeouts (a dead connection is noticed), one request at a time per connection, IPv4 first (`/etc/gai.conf`: many mobile networks have an IPv6 address that does not really work, and then every connection waits for its timeout before it tries IPv4), and the Debian image and the SP Flash Tool zip continue where they stopped.
+
+What is **not** measured: the real speed on a phone. It depends on the connection. The stand-in driver and the parallel download only remove waste, and the tests prove that they work with stand-in programs, not how much time they save on your network. What is also not checked here: the real apt of Debian 13 deciding to leave Mesa out. If it does not, you get the `Note:` and a slower install, not an error.
 
 ## The kernel-version fix
 
@@ -179,7 +206,7 @@ v5.2228  18b11eed...df10  https://spflashtools.com/wp-content/uploads/SP_Flash_T
 
 ## Settings (environment variables)
 
-You rarely need these. Set them in front of the command, for example `SPFT_MIN_MB=1000 spft install`. The four marked **(passed on)** are for the programs inside Debian, and spft hands them down inside the command line ([why](#what-happens-when-you-type-spft)). The ones that say *Inside Debian* and are not marked are not passed on: they are for the tests, and for whoever runs the Debian side by hand (`spft enter SPFT_POLL=2 /root/spft-provision.sh`).
+You rarely need these. Set them in front of the command, for example `SPFT_MIN_MB=1000 spft install`. The five marked **(passed on)** are for the programs inside Debian, and spft hands them down inside the command line ([why](#what-happens-when-you-start-the-tool-spft-start)). The ones that say *Inside Debian* and are not marked are not passed on: they are for the tests, and for whoever runs the Debian side by hand (`spft enter SPFT_POLL=2 /root/spft-provision.sh`).
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -190,11 +217,17 @@ You rarely need these. Set them in front of the command, for example `SPFT_MIN_M
 | `SPFT_TOOL` | the first name in `lib/tools.conf` | The SP Flash Tool version `spft tool` installs |
 | `SPFT_TOOL_SHA256` | none | The checksum to demand for `spft tool https://...` |
 | `SPFT_MIN_MB` | `1500` | `spft install` refuses to start with less free space than this |
+| `SPFT_JOBS` | `4` | **(passed on, for `spft install`)** How many files the install downloads at the same time. `1`: only apt downloads, one file after the other |
+| `SPFT_MENU` | not set | `text`: the menu is a numbered list, even where `dialog` is installed |
+| `SPFT_CONF` | `~/.spft/config` | Where the menu keeps its settings |
+| `SPFT_NO_AUTO` | not set | When set to anything, the startup hook does not open the menu in this shell |
+| `SPFT_FORCE_TTY` | not set | Treat the session as a terminal even if it is none (for the tests) |
 | `SPFT_FAKE_KERNEL` | `auto` | **(passed on)** Which kernel version SP Flash Tool is shown: `auto` (a fix only for the kernels 4.19.100 to 4.19.139), `off`, or a version like `5.4.0` ([details](TROUBLESHOOTING.md#the-invalid-linux-kernel-version-message)) |
 | `SPFT_STORAGE` | `auto` | **(passed on)** The home folder of the tool, so where its file windows start: `auto` (`/sdcard`, the internal storage), `off` (Debian's own `/root`), or a folder ([details](#the-home-folder-of-the-file-windows)) |
 | `SPFT_BEAT` | `20` | Inside Debian, during the setup: seconds between the `still working` lines |
 | `SPFT_POLL` | `5` | Inside Debian, during the setup: seconds between the download progress lines (and between the lines that stand in for the bar when the output is not a terminal) |
 | `SPFT_FRAME` | `0.3` | Inside Debian, during the setup: seconds between two pictures of the moving bar |
+| `SPFT_RETRIES`, `SPFT_RETRY_WAIT` | `3`, `5` | Inside Debian, during the setup: how many more times a failed download is tried, and the first wait in seconds (it doubles each time) |
 | `SPFT_LIBDIR` | `/usr/local/lib/spft` | Inside Debian: where `spft-run` finds the kernel-version fix |
 | `SPFT_REPO`, `SPFT_BRANCH` | the published repository, `main` | For `check.sh`: which repository and branch to download |
 | `SPFT_DISPLAY` | `auto` | Inside Debian: `x11` or `vnc` (`spft x11` and `spft vnc` set it) |
@@ -215,14 +248,14 @@ You rarely need these. Set them in front of the command, for example `SPFT_MIN_M
 | Test | What it covers |
 |---|---|
 | `t_run.sh` | `lib/run.sh`: display choice, one copy of the tool, which version starts, the openbox rule, the kernel-version fix, the home folder of the tool (`SPFT_STORAGE` auto / off / a folder / a missing folder, and that the XDG folders keep the settings in `/root`) |
-| `t_host.sh` | the `spft` command: start, settings typed in front of the command (through a `su` that drops the environment), the zoom for a table of screens, stop (the Debian processes, the Termux:X11 server and app, the mounts, the caches, a mount that will not go, the cleaning refusing shallow folders and walking around mount points), enter, check (the Termux:X11 app seen by root but not by `pm`, root refused, no su, the screen row, every kernel version case, the Result block with its blockers and limits), update, umount, uninstall (including: nothing is deleted while something is mounted), Termux:X11 settings, bad options |
+| `t_host.sh` | the `spft` command: the menu (with a stand-in `dialog`: Start SP Flash Tool first, Exit, the screen list, every kind of entry, autostart on and off, the hook in a new shell, the text menu, no `dialog` program), start, settings typed in front of the command (through a `su` that drops the environment), the zoom for a table of screens, stop (the Debian processes, the Termux:X11 server and app, the mounts, the caches, a mount that will not go, the cleaning refusing shallow folders and walking around mount points), enter, check (the Termux:X11 app seen by root but not by `pm`, root refused, no su, the screen row, every kernel version case, the Result block with its blockers and limits), update, umount, uninstall (including: nothing is deleted while something is mounted), Termux:X11 settings, bad options |
 | `t_tool.sh` | `spft tool`: downloads, mirrors, checksums, unpacking, damaged zips, wrong CPU type |
-| `t_install.sh` | `install.sh` and `spft install`: fresh install, repeating it, the Termux:X11 app (installed, missing, "could not tell"), no root (asked for before anything is installed), 32-bit kernel, no space, no internet, a failed tool download, folders with spaces |
-| `t_provision.sh` | `lib/provision.sh` with a stand-in `apt-get`: the progress display (the moving bar on a real terminal, driven through a pty, and the lines that stand in for it elsewhere; counters, percent, `still working` lines), the notes under the harmless warnings, background loops that end with the script, the `dpkg --configure -a` repair, unknown package names, no internet, the self-test choosing the real program and not the text file, a broken box64, building box64 from source, a half-downloaded file |
+| `t_install.sh` | `install.sh` and `spft install`: fresh install, repeating it, the Termux:X11 app (installed, missing, "could not tell"), no root (asked for before anything is installed), 32-bit kernel, no space, no internet, a failed tool download, a download that was cut off and is continued (and a damaged half file), `SPFT_JOBS` reaching Debian, folders with spaces |
+| `t_provision.sh` | `lib/provision.sh` with a stand-in `apt-get`: the progress display (the moving bar on a real terminal, driven through a pty, and the lines that stand in for it elsewhere; counters, percent, `still working` lines), the notes under the harmless warnings, background loops that end with the script, the `dpkg --configure -a` repair, unknown package names, no internet, the self-test choosing the real program and not the text file, a broken box64, building box64 from source, a half-downloaded file, the parallel download with its checksums (and a file that fails), the retry loop, no `Tried to start delayed item` loop, the graphics stand-in, `SPFT_JOBS` |
 | `t_check.sh` | `check.sh`: the download, another repository or branch, bad names, a failed or damaged download, running from a copy of the repository, as root, outside Termux, root refused, piped into bash |
 | `t_kernelfix.sh` | the kernel-version fix: which kernels are affected, what is shown, the library's structure, that it matches its source, and (on x86-64 Linux) the library loaded into real programs |
 | `t_publish.sh` | `tools/publish.sh` against a stand-in GitHub: first publish, run again, another name, the repository's description and topics (set only when they are empty), refusals, GitHub being ahead (an edit made on github.com is kept, also when the update carries the same line; a change to the same line stops it without pushing), an empty repository, and that the published copy (your name filled in) still passes `t_docs.sh` |
-| `t_docs.sh` | the documentation: every link and `#anchor` inside the repository works, every command of `spft help` is in the Guide, the install line is the same everywhere (with the placeholder, or with your name after publishing), the README is short and keeps its sections and credits, and the pictures in `assets/` are well-formed and safe (no scripts, nothing loaded from other websites) |
+| `t_docs.sh` | the documentation: every link and `#anchor` inside the repository works, every command of `spft help` is in the Guide, the install line is the same everywhere (with the placeholder, or with your name after publishing), the README is short and keeps its sections and credits, the screenshots and the author block with the live Telegram picture are in place, and the pictures in `assets/` are well-formed and safe (no scripts, nothing loaded from other websites) |
 
 `t_run.sh` and `t_host.sh` print what happened, and the output is compared with the saved copy in `tests/expected/`. After a change you made on purpose, run `bash tests/run_all.sh --update` and look at the diff in git.
 

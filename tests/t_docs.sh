@@ -302,10 +302,12 @@ for text in ("Exec format error", "systemctl: command not found", "Restarting sy
 n_lines = readme.count("\n") + 1
 need_sections = ("What you need", "Start in 3 steps", "Check a phone first (no install)", "How it works", "Everyday commands", "Need help?", "Good to know")
 miss_sec = [t for t in need_sections if slug(t) not in anchor_cache["README.md"]]
-if n_lines <= 200 and not miss_sec:
-    ok("the README is short (%d lines, at most 200) and has all its sections" % n_lines)
+need_sections += ("See it running",)
+miss_sec = [t for t in need_sections if slug(t) not in anchor_cache["README.md"]]
+if n_lines <= 240 and not miss_sec:
+    ok("the README is short (%d lines, at most 240) and has all its sections" % n_lines)
 else:
-    bad("the README has %d lines (at most 200: the long text belongs in docs/GUIDE.md) or lacks sections: %s" % (n_lines, miss_sec))
+    bad("the README has %d lines (at most 240: the long text belongs in docs/GUIDE.md) or lacks sections: %s" % (n_lines, miss_sec))
 credits = ("https://t.me/Shivraj_editx", "https://github.com/shivrajtode", "https://t.me/mkr_infinity", "**Kaif**", "Hovatek forum",
            "[mtkclient]", "[box64]", "[Termux:X11]", "[Debian]", "[Termux]")
 miss_credit = [c for c in credits if c not in readme]
@@ -376,6 +378,86 @@ if not alt_bad:
     ok("every picture of the README has an alt text (the icons are decoration: an empty one is fine)")
 else:
     bad("pictures without a proper alt text: %s" % alt_bad)
+# --- the author block at the very end: the live Telegram picture and the card -------------------------------------------------------------
+tg_live = '<a href="https://t.me/Shivraj_editx"><img src="https://t.me/i/userpic/320/Shivraj_editx.jpg"'
+tg_card = '<a href="https://t.me/Shivraj_editx"><img src="assets/author-card.svg"'
+if tg_live in readme and tg_card in readme:
+    tail = readme[readme.index(tg_live):]
+    card_svg = read("assets/author-card.svg")
+    vb = re.search(r'viewBox="0 0 (\d+) (\d+)"', card_svg)
+    dims = re.search(r'author-card\.svg"[^>]*width="(\d+)" height="(\d+)"', readme)
+    live_dims = re.search(r'userpic/320/Shivraj_editx\.jpg" width="(\d+)" height="(\d+)"', readme)
+    same_shape = bool(vb and dims) and int(vb.group(1)) * int(dims.group(2)) == int(vb.group(2)) * int(dims.group(1))
+    if (readme.index(tg_live) > readme.index("## Good to know") and tail.count("<img ") == 2 and tg_live in tail
+            and tail.index(tg_live) < tail.index(tg_card) and same_shape and live_dims and live_dims.group(2) == dims.group(2)):
+        ok("the README ends with the live Telegram picture and the author card, side by side, both linking to https://t.me/Shivraj_editx")
+    else:
+        bad("the author block at the end of the README is not as expected: the live picture, then the card (same height, the card's shape kept), the last two pictures, after the section Good to know")
+else:
+    bad("the README has no live Telegram picture (https://t.me/i/userpic/320/Shivraj_editx.jpg) and author card, each inside a link to https://t.me/Shivraj_editx")
+if re.search(r"\bhandle, link = \"@Shivraj_editx\", \"t\.me/Shivraj_editx\"", read("tools/make-assets.py")) and "Creator of spft" in read("tools/make-assets.py"):
+    ok("tools/make-assets.py draws the card with the same Telegram name as the README")
+else:
+    bad("the Telegram name in tools/make-assets.py (the author card) differs from the README")
+
+# --- the screenshots: real photos of the tool running on Android ----------------------------------------------------------------------------
+def jpeg_size(rel):
+    with open(os.path.join(repo, rel), "rb") as f:
+        data = f.read()
+    if data[:2] != b"\xff\xd8":
+        return None, len(data), data
+    i = 2
+    while i + 9 < len(data):
+        if data[i] != 0xFF:
+            i += 1
+            continue
+        marker = data[i + 1]
+        if marker in (0xC0, 0xC1, 0xC2):
+            return (int.from_bytes(data[i + 7:i + 9], "big"), int.from_bytes(data[i + 5:i + 7], "big")), len(data), data
+        if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+            i += 2
+        else:
+            i += 2 + int.from_bytes(data[i + 2:i + 4], "big")
+    return None, len(data), data
+
+shot_dir = os.path.join(repo, "assets", "screenshots")
+shots_used = sorted(set(re.findall(r'src="(assets/screenshots/[^"]+)"', readme)))
+shots_files = sorted("assets/screenshots/" + f for f in os.listdir(shot_dir)) if os.path.isdir(shot_dir) else []
+problems, total_shot_bytes = [], 0
+for rel in shots_used:
+    if not os.path.exists(os.path.join(repo, rel)):
+        problems.append("%s is missing" % rel)
+        continue
+    size, nbytes, data = jpeg_size(rel)
+    total_shot_bytes += nbytes
+    if size is None:
+        problems.append("%s is not a JPEG" % rel)
+        continue
+    w, h = size
+    if w < 600 or abs(w / h - 1.6) > 0.03:
+        problems.append("%s is %dx%d (at least 600 wide, 16:10)" % (rel, w, h))
+    if nbytes > 150000:
+        problems.append("%s is %d KB (at most 150)" % (rel, nbytes // 1024))
+    if b"Exif" in data[:4096]:
+        problems.append("%s carries metadata (EXIF)" % rel)
+hero = "assets/screenshots/running-on-android.jpg"
+hero_size = jpeg_size(hero)[0] if os.path.exists(os.path.join(repo, hero)) else None
+if len(shots_used) != 4:
+    problems.append("the README should show 4 screenshots, it shows %d" % len(shots_used))
+if hero not in shots_used or not hero_size or hero_size[0] < 1200:
+    problems.append("the picture with the Android status bar (%s) is missing or too small (at least 1200 wide)" % hero)
+if not re.search(r'running-on-android\.jpg"[^>]*alt="[^"]*status bar', readme):
+    problems.append("the alt text of the status-bar picture does not say 'status bar'")
+unused_shots = [f for f in shots_files if f not in shots_used]
+if unused_shots:
+    problems.append("not used by the README: %s" % ", ".join(unused_shots))
+if total_shot_bytes > 300000:
+    problems.append("together %d KB (at most 300)" % (total_shot_bytes // 1000))
+if not problems:
+    ok("the 4 screenshots (with the Android status bar) are in the README, real JPEGs of 16:10 without metadata, %d KB together" % (total_shot_bytes // 1000))
+else:
+    bad("problems with the screenshots: %s" % "; ".join(problems))
+
 png = os.path.join(assets_dir, "social-preview.png")
 if os.path.exists(png):
     head = open(png, "rb").read(32)

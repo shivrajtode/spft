@@ -10,9 +10,19 @@ These are the pictures of the front page ([README](../README.md)). spft does not
 | `terminal.svg` | "Check a phone first" |
 | `stack.svg` | "How it works" |
 | `icon-*.svg` | the small icons of the cards |
+| `author-card.svg` | the card at the very end of the README, next to the live Telegram profile picture |
+| `screenshots/*.jpg` | "See it running": four real screenshots of SP Flash Tool on an Android tablet. The first one shows the Android status bar and the notification panel (Termux and Termux:X11), so people can see that it really runs on Android |
 | `social-preview.svg` and `social-preview.png` | the picture people see when they share the link to this repository |
 
 The pictures move a little (they are animated SVG). They stand still when a phone or computer is set to "reduce motion".
+
+## The Telegram picture is live
+
+At the end of the README the profile picture on the left is not a file of this repository: it is `https://t.me/i/userpic/320/Shivraj_editx.jpg`, which Telegram serves for the public profile picture of that account, and GitHub fetches it for every reader. When the profile picture changes on Telegram, the README shows the new one by itself, within a short while (GitHub caches images). The card next to it, `author-card.svg`, is drawn by the script below. To use another account, change the name in the picture's address and link in `README.md`, and `handle` / `link` in `author_card()` in `tools/make-assets.py`.
+
+## The screenshots
+
+`screenshots/` holds real photos, so `tools/make-assets.py` does not draw them. They were taken on a tablet, scaled to 1280 pixels wide (the one with the status bar) and 640 pixels wide (the three small ones), and saved as JPEG without metadata, about 150 KB together. To change one, put a new picture under the same name, with the same size, so that the README keeps working. Keep them small: the front page loads them all.
 
 ## Social preview: upload it once, by hand
 

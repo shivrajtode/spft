@@ -79,12 +79,28 @@ case "${FAKE_PKG_FAIL:-}" in
 esac
 exit 0
 EOF
+# wget [-c] -O FILE URL. With -c a half file is continued: only the missing end of the rootfs is "downloaded", like wget does it
+# (and "wget-resume N" says from which byte). FAKE_WGET_FAIL=1: the connection drops after 1 MB, and what came stays in FILE.
 cat > "$T/pfx/bin/wget" <<'EOF'
 #!/bin/bash
 echo "wget $*" >> "$TLOG"
-if [ "${FAKE_WGET_FAIL:-}" = 1 ]; then echo "wget: unable to resolve host address" >&2; : > "$2"; exit 4; fi
-[ "$1" = -O ] || exit 2
-cp "$TT/rootfs.tar.gz" "$2"
+out=; cont=0
+while [ $# -gt 0 ]; do
+  case $1 in
+    -O) out=$2; shift 2 ;;
+    -c) cont=1; shift ;;
+    *) shift ;;
+  esac
+done
+[ -n "$out" ] || exit 2
+have=0
+if [ "$cont" = 1 ] && [ -s "$out" ]; then have=$(wc -c < "$out"); echo "wget-resume $have" >> "$TLOG"; else : > "$out"; fi
+if [ "${FAKE_WGET_FAIL:-}" = 1 ]; then
+  tail -c +$((have + 1)) "$TT/rootfs.tar.gz" | head -c 1000000 >> "$out"
+  echo "wget: connection lost" >&2
+  exit 4
+fi
+tail -c +$((have + 1)) "$TT/rootfs.tar.gz" >> "$out"
 EOF
 for c in mount umount; do printf '#!/bin/bash\necho "%s $*" >> "$TLOG"\n' "$c" > "$T/sysbin/$c"; done
 # chroot: /bin/true (the preflight), `od` on a path inside /opt, and the provisioning run (which can "fail its self-test")
@@ -185,11 +201,14 @@ has "$T/out" 'Reminder: install the Termux:X11 app' "reminds again at the end"
 hasnt "$T/out" 'must come from GitHub' "does not insist on one particular source for the app"
 has "$T/out" 'Four steps follow' "says what the long step will show"
 has "$T/out" "working, not stuck" "says that the longest step is working, not stuck"
-has "$T/out" 'done. Start SP Flash Tool with:  spft' "ends by telling you to type spft"
+has "$T/out" 'done. Type  spft  and press Enter: the menu opens, and Start SP Flash Tool is its first entry' "ends by telling you to type spft (the menu opens)"
+has "$T/out" 'Or start the tool right away with:  spft start' "and says how to skip the menu"
+has "$T/out" 'SPFT_JOBS=1 spft install' "says how to download one file at a time"
 echo "--- Termux packages asked for:"; grep '^pkg ' "$LOG"
 has "$LOG" '^pkg install -y git curl wget tar unzip xz-utils coreutils x11-repo$' "installs git, curl, ... and the x11 repository"
 has "$LOG" '^pkg install -y termux-x11-nightly$' "installs the Termux:X11 package"
 has "$LOG" '^pkg install -y termux-api$' "installs termux-api"
+has "$LOG" '^pkg install -y wget curl xz-utils tar unzip coreutils dialog$' "installs the tools spft needs itself, with dialog for the menu"
 [ -x "$T/pfx/bin/spft" ] && ok "the spft command was added" || bad "no spft command"
 head -n 2 "$T/pfx/bin/spft" | sed_t
 [ "$(count '^wget ')" = 1 ] && ok "Debian downloaded once" || bad "wget calls: $(count '^wget ')"
@@ -335,9 +354,40 @@ fresh
 run FAKE_WGET_FAIL=1 bash "$T/repo/install.sh" > "$T/out" 2>&1; rc=$?
 tail -n 3 "$T/out" | sed_t; echo "exit=$rc"
 [ "$rc" = 1 ] && has "$T/out" 'could not download Debian' "a failed download gets a message" || bad "wget failure: rc=$rc"
-if compgen -G "$T/dl/*rootfs*" > /dev/null; then bad "a half-written rootfs file is left behind"; else ok "no half-written rootfs file left"; fi
+if [ -e "$T/dl/rootfs.tar.gz" ]; then bad "a half-downloaded file was left as rootfs.tar.gz"; else ok "no rootfs.tar.gz after the failed download"; fi
+[ "$(wc -c < "$T/dl/rootfs.part" 2>/dev/null)" = 1000000 ] && ok "what came (1 MB) is kept as rootfs.part, for the next run" || bad "rootfs.part: $(wc -c < "$T/dl/rootfs.part" 2>/dev/null) bytes"
+has "$T/out" 'what was downloaded is kept' "the message says that it is kept"
+: > "$LOG"
 run bash "$T/repo/install.sh" > "$T/out" 2>&1; rc=$?
 [ "$rc" = 0 ] && ok "the next run completes" || bad "next run: rc=$rc"
+has "$LOG" '^wget-resume 1000000$' "it continued behind the first megabyte, not from the start"
+has "$LOG" '^wget -c -O ' "and it asks wget to continue (-c)"
+[ ! -e "$T/dl/rootfs.part" ] && [ -s "$T/dl/rootfs.tar.gz" ] && ok "rootfs.part became rootfs.tar.gz" || bad "rootfs.part / rootfs.tar.gz are not as they should be"
+cmp -s "$T/dl/rootfs.tar.gz" "$T/rootfs.tar.gz" && ok "and it is the same file as on the server" || bad "the continued download differs from the original"
+
+echo; echo "=== 12b. a damaged half file (the server changed the file meanwhile): it is thrown away and fetched again from the start"
+fresh
+mkdir -p "$T/dl"; head -c 2000000 /dev/urandom > "$T/dl/rootfs.part"
+run bash "$T/repo/install.sh" > "$T/out" 2>&1; rc=$?
+grep 'damaged' "$T/out"; echo "exit=$rc   wget calls: $(count '^wget ')"
+[ "$rc" = 0 ] && ok "the install completes" || bad "exit status $rc"
+has "$T/out" 'starting again from the beginning' "says that it starts again"
+[ "$(count '^wget ')" = 2 ] && [ "$(count '^wget-resume ')" = 1 ] && ok "two downloads: the continued one, then a fresh one" || bad "wget calls: $(count '^wget ') resumes: $(count '^wget-resume ')"
+cmp -s "$T/dl/rootfs.tar.gz" "$T/rootfs.tar.gz" && ok "the rootfs is the right file" || bad "the rootfs differs from the original"
+
+echo; echo "=== 12c. a setting typed in front of the command (SPFT_JOBS=3 spft install) reaches the setup script inside Debian"
+fresh
+run SPFT_JOBS=3 bash "$T/repo/install.sh" > "$T/out" 2>&1; rc=$?
+echo "exit=$rc"; grep 'SPFT_JOBS' "$LOG" | sed_t
+[ "$rc" = 0 ] && ok "install works" || bad "exit status $rc"
+has "$LOG" "SPFT_JOBS='3' /root/spft-provision.sh\$" "the number of downloads at a time arrives in front of the setup script (in quotes, as one word)"
+fresh
+run bash "$T/repo/install.sh" > "$T/out" 2>&1
+hasnt "$LOG" 'SPFT_JOBS' "nothing is added when nothing was typed"
+fresh
+run "SPFT_JOBS=2 3; touch $T/pwned" bash "$T/repo/install.sh" > "$T/out" 2>&1
+[ ! -e "$T/pwned" ] && ok "a value with a space and a semicolon stays one harmless word" || bad "the value was run as a command"
+has "$LOG" "SPFT_JOBS='2 3; touch .*pwned' /root/spft-provision.sh\$" "and arrives as it was typed, inside the quotes"
 
 echo; echo "=== 13. the SP Flash Tool download fails: Debian stays set up, the steps are shown, \`spft tool\` finishes it"
 fresh; unserve

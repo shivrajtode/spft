@@ -171,13 +171,13 @@ run "$T/loose" 2>&1 | grep -q 'has to stay inside the spft folder' && ok "a loos
 [ ! -d "$T/proj3/.git" ] && ok "refusals did not touch the project" || bad "a refusal left a .git folder"
 
 echo; echo "=== 6. GitHub is AHEAD of this folder (an edit made on github.com): the edit is kept and the push works"
-# the edit on github.com: one line after the credit line of the README (made in a clone of 'GitHub', then pushed)
+# the edit on github.com: one line after the thanks line of the README (made in a clone of 'GitHub', then pushed)
 web() { # web CLONE 'sed script' MESSAGE
   g -C "$1" pull -q 2>/dev/null
   sed -i -e "$2" "$1/README.md"
   g -C "$1" -c user.name=web -c user.email=web@example.com commit -q -am "$3" && g -C "$1" push -q origin main
 }
-web "$T/clone" '/^Made by \*\*Shivraj\*\*:/a And special thanks to my friend, for the guide.' "Add acknowledgment for a friend in README" \
+web "$T/clone" '/^Thanks to \[Termux\]/a And special thanks to my friend, for the guide.' "Add acknowledgment for a friend in README" \
   && ok "(set-up) the edit was made on 'GitHub'" || bad "(set-up) the edit on 'GitHub' failed"
 sed -i '1s/$/ (local edit)/' "$T/proj/README.md"      # a different place in the same file, made here
 run "$T/proj" > "$T/out" 2>&1; rc=$?
@@ -192,8 +192,8 @@ has "$T/proj/README.md" '^And special thanks to my friend, for the guide\.$' "th
 g -C "$T/clone" log --merges --format=%s | grep -q 'Merge the changes made on GitHub' && ok "one merge commit joins the two" || bad "no merge commit"
 
 echo; echo "=== 7. the same line added on GitHub and in this folder (the update already carries the edit): it is there once, no conflict"
-web "$T/clone" '/^Made by \*\*Shivraj\*\*:/a Thanks also to a second friend.' "Add a second friend" && ok "(set-up) the second edit was made on 'GitHub'" || bad "(set-up) failed"
-sed -i '/^Made by \*\*Shivraj\*\*:/a Thanks also to a second friend.' "$T/proj/README.md"
+web "$T/clone" '/^Thanks to \[Termux\]/a Thanks also to a second friend.' "Add a second friend" && ok "(set-up) the second edit was made on 'GitHub'" || bad "(set-up) failed"
+sed -i '/^Thanks to \[Termux\]/a Thanks also to a second friend.' "$T/proj/README.md"
 run "$T/proj" > "$T/out" 2>&1; rc=$?
 [ "$rc" = 0 ] && ok "exit 0" || { bad "exit status $rc"; sed_t < "$T/out" | tail -n 8; }
 g -C "$T/clone" pull -q 2>/dev/null

@@ -7,5 +7,6 @@
 *.py text eol=lf
 *.svg text eol=lf
 *.png binary
+*.jpg binary
 spft text eol=lf
 install.sh text eol=lf

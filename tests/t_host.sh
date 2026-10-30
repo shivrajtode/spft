@@ -3,7 +3,7 @@
 # mount, chroot, termux-x11, termux-x11-preference, am, pm and the wake-lock tools.
 # Needs: bash, python3, git, sed, pgrep. It refuses to run where a real /system/bin/mount exists.
 # On purpose in the tests: ok/bad always return 0, patterns are literal text, printf builds escapes.
-# shellcheck disable=SC2015,SC2016,SC2012,SC2002,SC2059
+# shellcheck disable=SC2015,SC2016,SC2012,SC2002,SC2059,SC2119,SC2120
 set -u
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 if [ -e /system/bin/mount ]; then echo "ABORT: /system/bin/mount exists here"; exit 1; fi
@@ -218,7 +218,7 @@ echo "settings-tool calls: list=$(grep -c '^pref list' "$T/pref.log") set=$(grep
 
 echo; echo "=== H. plain \`spft\` (no argument) does the same as x11"
 : > "$LOG"; : > "$T/pref.log"
-run "$T/bin"; echo "exit=$?"
+run "$T/bin" < /dev/null; echo "exit=$?"     # without a terminal on stdin: with one, spft would open its menu
 echo "tool started: $(grep -c '^chroot-call' "$LOG")   last chroot args:"; lastcall | tail -n 2
 
 echo; echo "=== H2. spft start / spft help / an unknown command"
@@ -590,6 +590,181 @@ echo "-- an old kernel, no driver, 32-bit: everything at once"
 FAKE_UNAME_R=3.18.71 FAKE_ARM64=0 FAKE_ACM=n FAKE_FREE_MB=1000 FAKE_SDK=31 run "$T/bin" check 2>&1 | sed -n '/^== Result/,$p'
 echo "-- the check is only a read: it changed nothing in Debian"
 if [ -e "$T/root/.spft-provisioned" ]; then echo "FAIL: check wrote a marker"; else echo "ok: no marker written"; fi
+
+echo; echo "=== M. the menu: \`spft\` in a terminal opens a dialog with Start SP Flash Tool first (a stand-in for dialog answers with the tags we give it)"
+# The stand-in reads its answers (one tag per line) from $DIALOG_ANS, takes the first one for each call, and answers Exit (status 1)
+# when none is left. Like the real dialog it prints the chosen tag on stderr. Every call is logged in $DIALOG_LOG.
+cat > "$T/bin/dialog" <<'EOF'
+#!/bin/bash
+echo "dialog $*" >> "$DIALOG_LOG"
+ans=$(head -n 1 "$DIALOG_ANS" 2>/dev/null) || ans=
+[ -n "$ans" ] || exit 1
+sed -i 1d "$DIALOG_ANS"
+echo "$ans" >&2
+EOF
+chmod +x "$T/bin/dialog"
+printf '#!/bin/bash\nexec bash "%s/spft_test.sh" "$@"\n' "$T" > "$T/bin/spft"; chmod +x "$T/bin/spft"   # the `spft` command that the startup hook looks for
+echo test-1 > "$T/VERSION"                                                                                # what the menu shows as the version
+MENU_EXTRA=''      # more settings for menu_run, for example SPFT_MENU=text
+MENU_STDIN=/dev/null
+menu_run() { # menu_run [ARGS...]   spft with a terminal (pretended); the answers of the dialog are in $T/dialog.ans
+  # The screen-clearing codes that the menu prints are taken out of the output (they depend on the terminal type).
+  local rc
+  # shellcheck disable=SC2086
+  env -i PATH="${MENU_PATH:-$T/bin}:/usr/bin:/bin" PREFIX="$T/pfx" SPFT_ROOT="$T/invisible" SPFT_DL="$T/dl" HOME="$T" TERM=xterm \
+      PREF_STATE="$T/pref.state" PREF_LOG="$T/pref.log" SPFT_FORCE_TTY=1 DIALOG_ANS="$T/dialog.ans" DIALOG_LOG="$T/dialog.log" \
+      FAKE_UNAME_R="5.10.43-android12-9" $MENU_EXTRA bash "${MENU_SCRIPT:-$T/spft_test.sh}" "$@" < "$MENU_STDIN" > "$T/menu.raw" 2>&1; rc=$?
+  sed 's/\x1b\[[0-9;?]*[A-Za-z]//g' "$T/menu.raw"
+  return $rc
+}
+answers() { printf '%s\n' "$@" > "$T/dialog.ans"; : > "$T/dialog.log"; : > "$LOG"; }
+dialog_calls() { grep -c '^dialog ' "$T/dialog.log" || true; }
+started() { grep -c '^chroot-call' "$LOG" || true; }
+rm -f "$T/.bashrc" "$T/.zshrc"; rm -rf "$T/.spft"
+
+echo "-- bare spft with a terminal opens the menu; entry 1 starts the tool"
+reset_prefs; answers 1
+menu_run > "$T/menu.out" 2>&1; echo "exit=$?   dialog calls: $(dialog_calls)   tool started: $(started)"
+d=$(cat "$T/dialog.log")
+case $d in *"--backtitle Made by @Shivraj_editx "*) echo "ok: the box says: Made by @Shivraj_editx" ;; *) echo "FAIL: no 'Made by @Shivraj_editx' in: $d" ;; esac
+case $d in *"--title  spft test-1 "*) echo "ok: the title has the version from the file VERSION" ;; *) echo "FAIL: title: $d" ;; esac
+case $d in *"--menu Flash or unbrick a MediaTek device 0 64 0 1 Start SP Flash Tool 2 "*) echo "ok: Start SP Flash Tool is the first entry" ;; *) echo "FAIL: first entry: $d" ;; esac
+case $d in *"--cancel-label Exit "*) echo "ok: the cancel button says Exit" ;; *) echo "FAIL: cancel label: $d" ;; esac
+for label in "Start with screen settings ..." "Stop and clear the caches" "Check this phone and setup" "Update spft" \
+             "Install/change SP Flash Tool" "Repair setup (install again)" "Open a shell inside Debian" "Start on a VNC desktop" \
+             "Open menu at Termux start: off" "About" "Uninstall"; do
+  case $d in *"$label"*) echo "ok: entry: $label" ;; *) echo "FAIL: missing entry: $label" ;; esac
+done
+
+echo "-- Exit (or Esc) closes the menu and starts nothing"
+answers; menu_run > "$T/menu.out" 2>&1; echo "exit=$?   dialog calls: $(dialog_calls)   tool started: $(started)"
+
+echo "-- entry 2: the screen settings, a list of their own"
+reset_prefs; answers 2 2
+menu_run > "$T/menu.out" 2>&1; echo "exit=$?   dialog calls: $(dialog_calls)   tool started: $(started)"
+echo "the screen list: $(sed -n '2p' "$T/dialog.log" | sed 's/.* 0 64 0 //')"
+echo "Termux:X11 settings now: $(tr '\n' ' ' < "$T/pref.state")"
+reset_prefs; answers 2 5
+menu_run > /dev/null 2>&1; echo "bigger: $(grep -o 'displayScale=[0-9]*' "$T/pref.state")"
+reset_prefs; answers 2 3
+menu_run > /dev/null 2>&1; echo "portrait: $(grep -o 'forceOrientation=[a-z ]*' "$T/pref.state")   zoom: $(grep -o 'displayScale=[0-9]*' "$T/pref.state")"
+reset_prefs; answers 2 7
+menu_run > /dev/null 2>&1; echo "leave alone: settings calls: $(grep -c '^pref [A-Za-z]*:' "$T/pref.log" || true)   tool started: $(started)"
+echo "-- Exit in the screen list goes back to the main menu"
+answers 2; menu_run > /dev/null 2>&1; echo "exit=$?   dialog calls: $(dialog_calls)   tool started: $(started)"
+
+echo "-- entry 4 runs spft check and the menu stays open (a second dialog call follows)"
+answers 4
+menu_run > "$T/menu.out" 2>&1; echo "exit=$?   dialog calls: $(dialog_calls)"
+grep -c '^== Result ==' "$T/menu.out" | sed 's/^/the check printed its Result block: /'
+echo "the prompt after it: $(grep -o 'Press Enter to go back to the menu \.\.\.' "$T/menu.out" | head -n 1)"
+
+echo "-- a command that fails does not close the menu (uninstall is asked, and nothing answers: it cancels with status 1)"
+answers c
+touch "$T/root/.sentinel"
+menu_run > "$T/menu.out" 2>&1; echo "exit=$?   dialog calls: $(dialog_calls)"
+grep -o -E 'cancelled - nothing was deleted|\(it ended with exit status [0-9]+\)' "$T/menu.out"
+[ -e "$T/root/.sentinel" ] && echo "ok: nothing was deleted" || echo "FAIL: the Debian folder is gone"
+
+echo "-- entry 8: a shell inside Debian; when it ends, the menu is there again"
+answers 8
+menu_run > /dev/null 2>&1; echo "exit=$?   dialog calls: $(dialog_calls)   chroot calls: $(grep -c '^chroot-call' "$LOG" || true)"
+
+echo "-- entry 3: stop"
+answers 3
+menu_run > "$T/menu.out" 2>&1; echo "exit=$?   dialog calls: $(dialog_calls)"; grep -o 'All of spft is stopped\. Start it again with:  spft start' "$T/menu.out"
+
+echo "-- entries 5, 6 and 7 (update, tool, install): each runs the command of that name and the menu is there again (the three commands are replaced by stand-ins here)"
+sed -e 's#^  update) cmd_update ;;#  update) echo "STUB update" ;;#' \
+    -e 's#^  tool) shift; cmd_tool "$@" ;;#  tool) shift; echo "STUB tool $*" ;;#' \
+    -e 's#^  install) shift; cmd_install "$@" ;;#  install) shift; echo "STUB install $*" ;;#' "$T/spft_test.sh" > "$T/spft_stub.sh"
+if [ "$(grep -c '"STUB ' "$T/spft_stub.sh")" = 3 ]; then :; else echo "FAIL: the stand-ins did not go into the copy"; fi
+answers 5 6 7
+MENU_SCRIPT=$T/spft_stub.sh menu_run > "$T/menu.out" 2>&1; echo "exit=$?   dialog calls: $(dialog_calls)"
+grep -o 'STUB [a-z]*' "$T/menu.out"
+rm -f "$T/spft_stub.sh"
+
+echo "-- entry 9: VNC"
+answers 9
+menu_run > /dev/null 2>&1; echo "exit=$?   tool started: $(started)   mode: $(lastcall | grep -c 'SPFT_DISPLAY=vnc')"
+
+echo "-- entry b: About"
+answers b
+menu_run > "$T/menu.out" 2>&1; echo "exit=$?"
+grep -E '^spft |^Made by|^Source:' "$T/menu.out" | sed "s#$T#\$T#g"
+
+echo "-- the autostart entry switches on and off; the line in the list shows which"
+answers a a
+menu_run > "$T/menu.out" 2>&1; echo "exit=$?   dialog calls: $(dialog_calls)"
+sed -n '2,3p' "$T/dialog.log" | grep -o 'Open menu at Termux start: [A-Za-z]*'
+echo "config now: $(cat "$T/.spft/config")   hook in .bashrc: $(grep -c '# >>> spft >>>' "$T/.bashrc" 2>/dev/null || true)"
+echo "messages: on: $(grep -c 'will open every time' "$T/menu.out")   off: $(grep -c 'will no longer open' "$T/menu.out")"
+
+echo "-- spft autostart on / off / status, typed by hand; it adds the hook once and takes out only its own lines"
+rm -f "$T/.bashrc" "$T/.zshrc"; rm -rf "$T/.spft"
+printf 'export FOO=bar\nalias ll="ls -l"\n' > "$T/.bashrc"
+run "$T/bin" autostart; run "$T/bin" autostart on; run "$T/bin" autostart on; run "$T/bin" autostart status
+echo "hooks in .bashrc after on, on: $(grep -c '# >>> spft >>>' "$T/.bashrc")   .zshrc made: $([ -e "$T/.zshrc" ] && echo yes || echo no)"
+sed "s#$T#\$T#g" "$T/.bashrc"
+run "$T/bin" autostart off; run "$T/bin" autostart status
+echo "after off: hooks: $(grep -c '# >>> spft >>>' "$T/.bashrc")   the other lines are still there: $(grep -c 'FOO=bar\|alias ll' "$T/.bashrc")   config: $(cat "$T/.spft/config")"
+run "$T/bin" autostart sideways 2>&1 | sed -n '1p'; echo "exit=${PIPESTATUS[0]}"
+echo zshrc-line > "$T/.zshrc"; run "$T/bin" autostart on > /dev/null; echo "a .zshrc that exists gets the hook too: $(grep -c '# >>> spft >>>' "$T/.zshrc")"
+run "$T/bin" autostart off > /dev/null; echo "and loses it again: $(grep -c '# >>> spft >>>' "$T/.zshrc")   its own line stays: $(grep -c zshrc-line "$T/.zshrc")"
+rm -f "$T/.zshrc"
+
+echo "-- the hook: it opens the menu in a terminal, only while AUTOSTART=1, and never when SPFT_NO_AUTO is set"
+rm -f "$T/.bashrc"; rm -rf "$T/.spft"
+run "$T/bin" autostart on > /dev/null
+hook() { # hook [VAR=value ...]   a new shell reading .bashrc, with a terminal (pretended); how many times did the menu open?
+  answers
+  env -i PATH="$T/bin:/usr/bin:/bin" PREFIX="$T/pfx" SPFT_ROOT="$T/invisible" SPFT_DL="$T/dl" HOME="$T" TERM=xterm \
+      PREF_STATE="$T/pref.state" PREF_LOG="$T/pref.log" DIALOG_ANS="$T/dialog.ans" DIALOG_LOG="$T/dialog.log" "$@" \
+      bash -c '. "$HOME/.bashrc"' < /dev/null > /dev/null 2>&1
+  dialog_calls
+}
+echo "AUTOSTART=1, a terminal:      menu opened $(hook SPFT_FORCE_TTY=1) time(s)"
+echo "AUTOSTART=1, no terminal:     menu opened $(hook) time(s)"
+echo "AUTOSTART=1, SPFT_NO_AUTO=1:  menu opened $(hook SPFT_FORCE_TTY=1 SPFT_NO_AUTO=1) time(s)"
+sed -i 's/^AUTOSTART=1/AUTOSTART=0/' "$T/.spft/config"
+echo "AUTOSTART=0, a terminal:      menu opened $(hook SPFT_FORCE_TTY=1) time(s)"
+rm -f "$T/.bashrc"; rm -rf "$T/.spft"
+
+echo "-- the text menu (SPFT_MENU=text): a numbered list, no dialog program"
+MENU_EXTRA='SPFT_MENU=text'; MENU_STDIN=$T/menu.in
+printf '2\n5\n' > "$MENU_STDIN"; reset_prefs; answers
+menu_run > "$T/menu.out" 2>&1; echo "exit=$?   dialog calls: $(dialog_calls)   tool started: $(started)   zoom: $(grep -o 'displayScale=[0-9]*' "$T/pref.state")"
+grep -E '^  (spft|1\)|2\)|a\)|0\))' "$T/menu.out" | head -n 5 | sed 's/ test-1$//'
+printf 'x\n4\n\n0\n' > "$MENU_STDIN"; answers
+menu_run > "$T/menu.out" 2>&1; echo "unknown entry, then check, Enter, 0: exit=$?   Result blocks: $(grep -c '^== Result ==' "$T/menu.out" || true)   menus shown: $(grep -c '^  spft test-1$' "$T/menu.out" || true)"
+grep -o "There is no entry 'x'.*" "$T/menu.out"
+MENU_EXTRA=''; MENU_STDIN=/dev/null
+
+echo "-- a screen too narrow for the box (the longest entry has 30 characters, the box needs 44 columns) gets the numbered list, nothing is cut off"
+MENU_STDIN=$T/menu.in; printf '1\n' > "$MENU_STDIN"
+for w in 30 43 44 50 120; do
+  MENU_EXTRA="COLUMNS=$w"; reset_prefs; answers 1
+  menu_run > "$T/menu.out" 2>&1
+  echo "$w columns: exit=$?   dialog calls: $(dialog_calls)   box width given: $(grep -o -E ' 0 [0-9]+ 0 1 Start' "$T/dialog.log" | grep -o -E '[0-9]+ 0 1' | cut -d' ' -f1 | head -n 1)   list shown: $(grep -c '^  1) Start SP Flash Tool$' "$T/menu.out" || true)   tool started: $(started)"
+done
+MENU_EXTRA='COLUMNS=abc'; reset_prefs; answers 1
+menu_run > "$T/menu.out" 2>&1; echo "a width that is not a number: exit=$?   dialog calls: $(dialog_calls) (the box is used)"
+MENU_EXTRA=''; MENU_STDIN=/dev/null
+
+echo "-- no dialog program (and pkg cannot get one): the same list as text"
+MENU_PATH=$T/bin3; MENU_STDIN=$T/menu.in; printf '0\n' > "$MENU_STDIN"
+mkdir -p "$T/bin8"; cp "$T/bin3/su" "$T/bin8/"; printf '#!/bin/bash\nexit 1\n' > "$T/bin8/pkg"; chmod +x "$T/bin8/pkg"
+menu_run > "$T/menu.out" 2>&1; echo "exit=$?"; sed -n '1,4p' "$T/menu.out"
+MENU_PATH=$T/bin8; menu_run > "$T/menu.out" 2>&1; echo "with a pkg that fails: exit=$?"; head -n 2 "$T/menu.out"
+MENU_PATH=; MENU_STDIN=/dev/null
+unset MENU_PATH
+
+echo "-- spft version, and the menu without a terminal"
+run "$T/bin" version
+run "$T/bin" menu 2>&1 | sed -n '1p'; echo "menu without a terminal: exit=${PIPESTATUS[0]}"
+: > "$LOG"; run "$T/bin" > /dev/null 2>&1; echo "bare spft without a terminal starts the tool: $(started)"
+rm -f "$T/VERSION" "$T/bin/spft" "$T/bin/dialog"; rm -rf "$T/.spft" "$T/bin8"
+run "$T/bin" version
 
 echo; echo "=== U. spft update: git pull, then the install step runs again (here the pkg stand-in stops it)"
 git init -q --bare -b main "$T/origin.git"

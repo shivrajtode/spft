@@ -32,6 +32,7 @@ resolve_self() {
 SELF=$(resolve_self)
 SPFT_HOME=${SELF%/*}
 LIB=$SPFT_HOME/lib
+VERSION=$(cat "$SPFT_HOME/VERSION" 2>/dev/null || echo '?')   # the number in the file VERSION next to this script
 
 die() { echo "spft: $*" >&2; exit 1; }
 say() { printf '\n>> %s\n' "$*"; }
@@ -42,7 +43,10 @@ usage() {
   cat <<'EOF'
 spft - SP Flash Tool on a rooted phone or tablet (Termux + Debian chroot + box64 + Termux:X11)
 
-  spft                      start SP Flash Tool (the same as: spft x11)
+  spft                      open the menu: Start SP Flash Tool is the first entry, then screen settings, stop, check,
+                            update, install, a shell in Debian, VNC, autostart, about, uninstall. Where there is no
+                            terminal to show a menu in (a shortcut, a script) it starts the tool instead.
+  spft start                start SP Flash Tool right away, without the menu (the same as: spft x11)
   spft x11 [options]        start it on Termux:X11. The screen is turned to landscape and fullscreen, and zoomed as
                             far as the whole tool window still fits on it (the tool is about 720 pixels tall)
         reverse               landscape the other way up (when the picture is upside down)
@@ -61,7 +65,10 @@ spft - SP Flash Tool on a rooted phone or tablet (Termux + Debian chroot + box64
                             `spft tool list` shows the versions it knows.
   spft check                test the phone and the setup, with a hint for every problem
   spft update               get the newest spft (git pull) and apply it
-  spft install              set up Debian + box64 + SP Flash Tool (install.sh runs this for you)
+  spft install              set up Debian + box64 + SP Flash Tool (install.sh runs this for you). Files download
+                            several at a time; SPFT_JOBS=1 spft install  makes it one at a time.
+  spft autostart on|off     open the menu every time Termux starts (off by default). `spft autostart` shows which.
+  spft version              show the version
   spft enter [command]      root shell inside Debian (or run one command there)
   spft umount               stop and unmount everything. It says WARNING and exits with 1 if something stays mounted.
   spft uninstall [--yes]    delete the Debian system and the downloads (asks first, and refuses while anything
@@ -458,13 +465,28 @@ check_zip() { # check_zip FILE SHA|-   a valid zip; when SHA is given, the check
 }
 
 download_zip() { # download_zip URL SHA OUT   0 when OUT now holds a good zip
-  rm -f "$3.part"
-  # the same flags as the Arch Linux packages use for this site (-b "" keeps cookies across redirects), plus a browser name
-  if curl -gfL -b "" --retry 3 --retry-delay 3 --connect-timeout 20 -A "$UA" -e "$1" -# -o "$3.part" "$1" </dev/null &&
-    check_zip "$3.part" "$2"; then
+  # A download that was cut off (the network, Ctrl+C) is continued the next time: the half file stays as OUT.part and curl
+  # carries on behind it (-C -). Both addresses of a file serve the same bytes, so it does not matter which one started it.
+  local rc _
+  if [ -s "$3.part" ] && check_zip "$3.part" "$2" >/dev/null 2>&1; then   # it was finished, only not moved into place
     mv -f "$3.part" "$3"
     return 0
   fi
+  for _ in 1 2; do
+    rc=0
+    # the same flags as the Arch Linux packages use for this site (-b "" keeps cookies across redirects), plus a browser name
+    curl -gfL -b "" -C - --retry 3 --retry-delay 3 --connect-timeout 20 -A "$UA" -e "$1" -# -o "$3.part" "$1" </dev/null || rc=$?
+    case $rc in
+      0)
+        if check_zip "$3.part" "$2"; then
+          mv -f "$3.part" "$3"
+          return 0
+        fi
+        break ;;                          # complete, but not the right file: getting it again would give the same file
+      22 | 33 | 36) rm -f "$3.part" ;;    # the server cannot continue a half file (or has none like it): once from the start
+      *) return 1 ;;                      # the connection: keep the half file, the next try continues it
+    esac
+  done
   rm -f "$3.part"
   return 1
 }
@@ -559,7 +581,7 @@ cmd_tool() { # cmd_tool [list|--if-missing|FILE.zip|URL|NAME]
   root_call root-tool "$zip" || return 1
   if [ "$quiet" = 0 ]; then
     echo
-    echo ">> SP Flash Tool is installed. Start it with:  spft"
+    echo ">> SP Flash Tool is installed. Start it with:  spft start   (or open the menu with:  spft)"
   fi
 }
 
@@ -685,16 +707,17 @@ write_provision() {
   chmod 755 "$R/root/spft-provision.sh"
 }
 
-root_install() { # root_install TARBALL
+root_install() { # root_install TARBALL [VAR='value' ...]   the words after the tarball are settings for the setup script (SPFT_JOBS)
   is_root || die "internal: needs root"
-  local sig
+  local sig tarball=$1
+  shift
   # the marker file proves a previous unpack ran to the end (an interrupted one is simply redone)
   if [ -e "$R/.spft-unpacked" ]; then
     echo ">> rootfs already unpacked in $R"
   else
     echo ">> unpacking rootfs into $R"
     mkdir -p "$R"
-    env LD_LIBRARY_PATH="$PREFIX/lib" PATH="$PREFIX/bin:$PATH" "$PREFIX/bin/tar" -xpf "$1" -C "$R" --numeric-owner
+    env LD_LIBRARY_PATH="$PREFIX/lib" PATH="$PREFIX/bin:$PATH" "$PREFIX/bin/tar" -xpf "$tarball" -C "$R" --numeric-owner
     : > "$R/.spft-unpacked"
   fi
   find_chroot || die "no chroot command found (tried /system/bin, /system/xbin and Termux)"
@@ -712,13 +735,31 @@ root_install() { # root_install TARBALL
   if [ -f "$R/.spft-provisioned" ] && [ "$(cat "$R/.spft-provisioned")" = "$sig" ]; then
     echo ">> Debian is already set up (box64, libraries, desktop)"
   else
-    root_enter /root/spft-provision.sh
+    root_enter "$@" /root/spft-provision.sh
     if [ -e "$R/root/.spft-selftest-failed" ]; then
       echo ">> the box64 self-test failed, so Debian is not marked as set up (the next 'spft install' tries again)"
       return 3
     fi
     printf '%s\n' "$sig" > "$R/.spft-provisioned"
   fi
+}
+
+# get_rootfs   download Debian's root file system into $DL/rootfs.tar.gz. A download that was cut off (the network, Ctrl+C) is
+# continued where it stopped (wget -c on $DL/rootfs.part). gzip -t then checks the file: when it is damaged (the address may
+# have started to serve a newer file while the first part of the old one was already there) it is deleted and fetched again,
+# once, from the beginning.
+get_rootfs() {
+  local _
+  for _ in 1 2; do
+    wget -c -O "$DL/rootfs.part" "$URL" || return 1
+    if gzip -t "$DL/rootfs.part" 2>/dev/null; then
+      mv -f "$DL/rootfs.part" "$DL/rootfs.tar.gz"
+      return 0
+    fi
+    echo ">> the file is damaged, or it changed on the server while it was being downloaded: starting again from the beginning"
+    rm -f "$DL/rootfs.part"
+  done
+  return 1
 }
 
 cmd_install() { # cmd_install [--no-tool]
@@ -748,24 +789,23 @@ cmd_install() { # cmd_install [--no-tool]
     fi
   fi
   wake_lock
-  pkg install -y wget curl xz-utils tar unzip coreutils || die "pkg could not install the Termux packages (try: termux-change-repo)"
+  pkg install -y wget curl xz-utils tar unzip coreutils dialog || die "pkg could not install the Termux packages (try: termux-change-repo)"
   mkdir -p "$DL"
   if [ ! -s "$DL/rootfs.tar.gz" ]; then
     say "downloading Debian $SUITE arm64 (about 30 MB)"
-    if ! wget -O "$DL/rootfs.part" "$URL"; then
-      rm -f "$DL/rootfs.part"
-      die "could not download Debian from $URL - check the internet connection, then run: spft install"
-    fi
-    mv "$DL/rootfs.part" "$DL/rootfs.tar.gz"
+    get_rootfs || die "could not download Debian from $URL - check the internet connection, then run: spft install (what was downloaded is kept, and continued)"
   fi
   [ "$(wc -c < "$DL/rootfs.tar.gz")" -gt 10000000 ] ||
     die "$DL/rootfs.tar.gz is too small to be a rootfs - delete it, or set SPFT_URL to a Debian arm64 rootfs tarball"
-  say "setting up Debian: box64, libraries, desktop (15-30 minutes the first time)"
-  echo "   Four steps follow. A moving bar shows that apt is checking, downloads show a counter (MB and files), the installing"
-  echo "   shows a counter, and a line appears every 20 seconds while a step is busy."
+  say "setting up Debian: box64, libraries, desktop (the first time this takes a while, it depends on your internet; the speed and the time left are shown)"
+  echo "   Four steps follow. A moving bar shows that apt is checking, downloads show a counter (MB and files, the speed and the"
+  echo "   time left), the installing shows a counter, and a line appears every 20 seconds while a step is busy."
+  echo "   Files download several at a time. If your connection does not like that:  SPFT_JOBS=1 spft install"
   echo "   The longest is '[2/4] arm64 + x86_64 libraries'. It is working, not stuck, even when it takes minutes."
-  local rc=0
-  root_call root-install "$DL/rootfs.tar.gz" || rc=$?
+  local rc=0 pset=''
+  # a setting typed in front of the command has to travel inside the command line, like the ones for the tool (see DSET)
+  if [ -n "${SPFT_JOBS:-}" ]; then pset="SPFT_JOBS=$(sq "$SPFT_JOBS")"; fi
+  root_call root-install "$DL/rootfs.tar.gz" ${pset:+"$pset"} || rc=$?
   case $rc in
     0 | 3) ;;
     *) die "setting up Debian failed (exit $rc) - read the messages above, then run: spft install" ;;
@@ -784,10 +824,11 @@ cmd_install() { # cmd_install [--no-tool]
   if [ "$tool_ok" = 0 ]; then
     say "Debian is ready, but SP Flash Tool is NOT installed yet."
     echo "   Follow the steps above to get the zip, then run:  spft tool"
-    echo "   After that, start it with:  spft"
+    echo "   After that, start it with:  spft start"
     return 1
   fi
-  say "done. Start SP Flash Tool with:  spft"
+  say "done. Type  spft  and press Enter: the menu opens, and Start SP Flash Tool is its first entry."
+  echo "   (Or start the tool right away with:  spft start)"
 }
 
 cmd_update() {
@@ -1204,7 +1245,7 @@ cmd_stop() {
   fi
   if command -v termux-wake-unlock >/dev/null 2>&1; then row wakelock "released, the phone may sleep again"; fi
   echo
-  echo "All of spft is stopped. Start it again with:  spft"
+  echo "All of spft is stopped. Start it again with:  spft start   (or open the menu with:  spft)"
 }
 
 cmd_uninstall() { # cmd_uninstall [--yes]
@@ -1230,13 +1271,224 @@ cmd_uninstall() { # cmd_uninstall [--yes]
   if [ -f "$DL/app/spft" ]; then rm -rf "$DL/app"; fi
   rm -f "$DL/rootfs.tar.gz" "$DL/rootfs.part" "$DL/x11.log" "$DL/x11-prefs.orig" "$DL"/SP_Flash_Tool_*.zip "$DL"/*.part
   rmdir "$DL" 2>/dev/null || true
+  # the menu's startup hook goes too: with Debian gone it would only open a menu that can start nothing
+  if [ "$(conf_get AUTOSTART)" = 1 ]; then cmd_autostart off; fi
   wake_unlock
   say "removed. To remove spft itself as well, run:  rm -rf \"$SPFT_HOME\" \"$PREFIX/bin/spft\""
 }
 
+# --- the menu: what `spft` opens in a terminal ---------------------------------------------------------------------
+# The same kind of menu as FlashKit's: a dialog box with "Made by @Shivraj_editx" at the top and "Start SP Flash Tool" as the
+# first entry. Where the `dialog` program is missing (or with SPFT_MENU=text) a numbered list is printed instead. Where there
+# is no terminal (a shortcut, a script) `spft` asks nothing and starts the tool, as it always did.
+# Every entry runs as a command of its own (`spft check` ...): one that fails, or ends with `exit`, cannot close the menu.
+
+CONF=${SPFT_CONF:-${HOME:-/data/local/tmp}/.spft/config}   # the menu's settings, one KEY=value per line (AUTOSTART=1)
+CHOICE=''                                                    # what menu_choose picked
+BOX_PAD=11                                                   # what dialog adds to the longest entry: frames, the number or letter, spaces (measured)
+BOX_MAX=64                                                   # the widest box, the same as the FlashKit menu; on a wider screen it is centred
+
+conf_get() { sed -n "s/^$1=//p" "$CONF" 2>/dev/null | tail -n 1; }
+conf_set() { # conf_set KEY VALUE
+  mkdir -p "${CONF%/*}"
+  { grep -v "^$1=" "$CONF" 2>/dev/null || true; echo "$1=$2"; } > "$CONF.tmp"
+  mv -f "$CONF.tmp" "$CONF"
+}
+
+is_tty() { { [ -t 0 ] && [ -t 1 ]; } || [ -n "${SPFT_FORCE_TTY:-}" ]; }
+
+have_dialog() { # the dialog program, fetched once with pkg when it is not there yet
+  if [ "${SPFT_MENU:-}" = text ]; then return 1; fi
+  if ! command -v dialog >/dev/null 2>&1 && command -v pkg >/dev/null 2>&1; then
+    echo "setting up the menu (one time) ..."
+    pkg install -y dialog >/dev/null 2>&1 || true
+  fi
+  command -v dialog >/dev/null 2>&1
+}
+
+screen_cols() { # how many characters fit in a line of this screen (80 when nothing can tell)
+  local c
+  c=$(tput cols 2>/dev/null) || c=$(stty size 2>/dev/null | awk '{ print $2 }') || c=80
+  case $c in '' | *[!0-9]*) c=80 ;; esac
+  echo "$c"
+}
+
+cls() { clear 2>/dev/null || printf '\033[H\033[2J'; }   # a clean screen; never fails (a Termux without `clear` gets the escape codes)
+
+# menu_choose TITLE TEXT ITEMS   ITEMS is one "TAG|LABEL" per line. The tag that was chosen ends up in CHOICE.
+# Returns 1 when the person chose Exit (or pressed Esc, or typed 0).
+menu_choose() {
+  local title=$1 text=$2 items=$3 tag label args=() longest=0 box=0 width
+  CHOICE=''
+  while IFS='|' read -r tag label; do
+    [ -n "$tag" ] || continue
+    args+=("$tag" "$label")
+    if [ "${#label}" -gt "$longest" ]; then longest=${#label}; fi
+  done <<EOF
+$items
+EOF
+  # The box is as wide as the screen (two columns less), but not wider than BOX_MAX. A box narrower than its longest entry plus
+  # BOX_PAD would have words cut off at the right edge (a phone held upright, with big letters): there a plain numbered list,
+  # which the screen wraps, is better than a box that hides words.
+  width=$(($(screen_cols) - 2))
+  if [ "$width" -gt "$BOX_MAX" ]; then width=$BOX_MAX; fi
+  if [ "$width" -ge $((longest + BOX_PAD + 1)) ] && have_dialog; then box=1; fi
+  if [ "$box" = 1 ]; then
+    # The height (0) and the length of the list (0) dialog works out itself, and it shrinks them to a small screen. The width is
+    # given: with 0 dialog guesses it from the entries, then wraps the text in a narrower box, and one row too few is left for
+    # the list. The answer comes on stderr, hence the swap of 1 and 2.
+    CHOICE=$(dialog --clear --backtitle "Made by @Shivraj_editx" --title " $title " --cancel-label "Exit" \
+      --menu "$text" 0 "$width" 0 "${args[@]}" 3>&1 1>&2 2>&3) || { cls; return 1; }
+    cls
+  else
+    printf '\n  %s\n  %s\n' "$title" "$(printf '%*s' "${#title}" '' | tr ' ' '-')"
+    while IFS='|' read -r tag label; do
+      [ -n "$tag" ] || continue
+      printf '  %s) %s\n' "$tag" "$label"
+    done <<EOF
+$items
+EOF
+    printf '  0) Exit\n\nChoose: '
+    read -r CHOICE || return 1
+    case $CHOICE in 0 | '') return 1 ;; esac
+  fi
+  return 0
+}
+
+pause() { printf '\nPress Enter to go back to the menu ... '; read -r _ || true; }
+
+# run_spft ARGS...   one of spft's own commands, in a process of its own
+run_spft() { "$BASH" "$SELF" "$@" || echo "(it ended with exit status $?)"; }
+
+menu_items() {
+  local auto=off
+  if [ "$(conf_get AUTOSTART)" = 1 ]; then auto=ON; fi
+  cat <<EOF
+1|Start SP Flash Tool
+2|Start with screen settings ...
+3|Stop and clear the caches
+4|Check this phone and setup
+5|Update spft
+6|Install/change SP Flash Tool
+7|Repair setup (install again)
+8|Open a shell inside Debian
+9|Start on a VNC desktop
+a|Open menu at Termux start: $auto
+b|About
+c|Uninstall
+EOF
+}
+
+screen_menu() { # the screen settings of `spft x11`, as a list. Returns 0 (the menu goes on) unless it started the tool.
+  menu_choose "Screen settings" "How should the tool fill the screen?" "1|Fit the screen (default)
+2|Landscape, other way up
+3|Portrait (do not rotate)
+4|Smaller: zoom 100
+5|Bigger: zoom 150 (may cut)
+6|Keep the extra keys bar
+7|Leave Termux:X11 alone
+8|Put Termux:X11 settings back" || return 0
+  case $CHOICE in
+    1) exec "$BASH" "$SELF" start ;;
+    2) exec "$BASH" "$SELF" x11 reverse ;;
+    3) exec "$BASH" "$SELF" x11 portrait ;;
+    4) exec "$BASH" "$SELF" x11 zoom=100 ;;
+    5) exec "$BASH" "$SELF" x11 zoom=150 ;;
+    6) exec "$BASH" "$SELF" x11 keys ;;
+    7) exec "$BASH" "$SELF" x11 plain ;;
+    8) run_spft x11 reset; pause ;;
+  esac
+  return 0
+}
+
+menu_about() {
+  local url
+  url=$(git -C "$SPFT_HOME" config --get remote.origin.url 2>/dev/null || true)
+  echo
+  echo "spft $VERSION - SP Flash Tool on a rooted Android phone or tablet"
+  echo "Made by Shivraj - Telegram @Shivraj_editx (https://t.me/Shivraj_editx) - GitHub shivrajtode"
+  echo "Source: ${url:-https://github.com/shivrajtode/spft}"
+  echo "SP Flash Tool belongs to MediaTek and is not part of spft."
+}
+
+menu_action() { # menu_action TAG   returns 99 when the menu is to close
+  case $1 in
+    1) exec "$BASH" "$SELF" start ;;
+    2) screen_menu ;;
+    3) run_spft stop; pause ;;
+    4) run_spft check; pause ;;
+    5) run_spft update; pause; exec "$BASH" "$SELF" menu ;;   # the menu again, from the files that were just updated
+    6) run_spft tool; pause ;;
+    7) run_spft install; pause ;;
+    8) run_spft enter ;;                                      # back in the menu when the shell in Debian is left
+    9) exec "$BASH" "$SELF" vnc ;;
+    a) if [ "$(conf_get AUTOSTART)" = 1 ]; then run_spft autostart off; else run_spft autostart on; fi; pause ;;
+    b) menu_about; pause ;;
+    c) run_spft uninstall; pause ;;
+    *) echo "There is no entry '$1' - type one of the characters in the list, or 0 to leave." ;;   # only the text menu can get here
+  esac
+  return 0
+}
+
+do_menu() {
+  local rc
+  while :; do
+    menu_choose "spft $VERSION" "Flash or unbrick a MediaTek device" "$(menu_items)" || return 0
+    rc=0
+    menu_action "$CHOICE" || rc=$?
+    if [ "$rc" -eq 99 ]; then return 0; fi
+  done
+}
+
+# The startup hook: a few lines in ~/.bashrc (and ~/.zshrc, if there is one) that open the menu when Termux starts, but only
+# in a terminal, and only while AUTOSTART=1 is in the settings. It sits between two marker lines, so `autostart off` can take
+# exactly these lines out again.
+add_hook() {
+  local rc
+  for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+    if [ "$rc" = "$HOME/.zshrc" ] && [ ! -f "$rc" ]; then continue; fi
+    if grep -qs '# >>> spft >>>' "$rc" 2>/dev/null; then continue; fi
+    cat >> "$rc" <<'HOOK'
+# >>> spft >>> (added by spft: turn it off with  spft autostart off)
+if { [ -t 0 ] && [ -t 1 ] || [ -n "${SPFT_FORCE_TTY:-}" ]; } && [ -z "${SPFT_NO_AUTO:-}" ] && command -v spft >/dev/null 2>&1; then
+  if grep -qs '^AUTOSTART=1' "$HOME/.spft/config" 2>/dev/null; then
+    spft
+  fi
+fi
+# <<< spft <<<
+HOOK
+  done
+}
+remove_hook() {
+  local rc
+  for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+    if [ -f "$rc" ]; then sed -i '/# >>> spft >>>/,/# <<< spft <<</d' "$rc"; fi
+  done
+}
+
+cmd_autostart() { # cmd_autostart [on|off|status]
+  ! is_root || die "run autostart from Termux as a normal user"
+  case ${1:-status} in
+    on)
+      add_hook
+      conf_set AUTOSTART 1
+      echo "The spft menu will open every time you open Termux. Turn that off with:  spft autostart off" ;;
+    off)
+      conf_set AUTOSTART 0
+      remove_hook
+      echo "The spft menu will no longer open by itself." ;;
+    status)
+      if [ "$(conf_get AUTOSTART)" = 1 ]; then echo "autostart is ON: the menu opens when Termux starts"; else echo "autostart is off"; fi ;;
+    *) die "autostart: say on, off or status" ;;
+  esac
+}
+
 case "${1:-}" in
-  "") cmd_x11 ;;
+  "") if is_tty; then do_menu; else cmd_x11; fi ;;
+  menu) is_tty || die "the menu needs a terminal. To start the tool without one:  spft start"; do_menu ;;
   start | x11) shift; cmd_x11 "$@" ;;
+  autostart) shift; cmd_autostart "$@" ;;
+  version | -v | --version) echo "$VERSION" ;;
   vnc) cmd_vnc ;;
   stop) cmd_stop ;;
   tool) shift; cmd_tool "$@" ;;
@@ -1251,7 +1503,7 @@ case "${1:-}" in
   root-check) root_check ;;
   root-app-installed) rc=0; root_app_installed "${2:?package name missing}" || rc=$?; case $rc in 0) echo yes ;; 1) echo no ;; *) echo unknown ;; esac ;;
   root-uninstall) root_uninstall ;;
-  root-install) root_install "${2:?tarball path missing}" ;;
+  root-install) root_install "${2:?tarball path missing}" "${@:3}" ;;
   root-tool) root_tool "${2:?zip path missing}" ;;
   root-tool-where) root_tool_where ;;
   root-find-zip) root_find_zip "${2:?name missing}" ;;
